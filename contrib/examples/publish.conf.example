@@ -1,0 +1,15 @@
+# mpris-scrobbler publish helper configuration
+#
+# Copy to:
+#   ~/.config/mpris-scrobbler/publish.conf
+#
+# Or let install.sh install it automatically if missing.
+
+# Local output directory for generated report files.
+OUTPUT_DIR="$HOME/music-report"
+
+# Remote rsync target.
+REMOTE_TARGET="user@host:/var/www/music-report"
+
+# Optional custom database path (leave empty for default path).
+DB_PATH=""

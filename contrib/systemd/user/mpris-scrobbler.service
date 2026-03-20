@@ -1,0 +1,13 @@
+[Unit]
+Description=MPRIS Scrobbler watcher
+Documentation=https://github.com/arturmeski/mpris_scrobbler
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mpris-scrobbler watch --player com.blitzfc.qbz
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
