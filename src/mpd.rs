@@ -600,6 +600,9 @@ pub fn run_mpd_watch(config: &MpdConfig, conn: Arc<Mutex<Connection>>, running: 
         }
     );
 
+    // Keep a clone of `conn` for inline cover extraction. The tracker closure
+    // owns the original; both share the same underlying Mutex<Connection>.
+    let conn_for_covers = conn.clone();
     let mut tracker = watcher::create_db_tracker(conn);
 
     // Outer loop: reconnect on failure until shutdown is requested.
@@ -635,9 +638,11 @@ pub fn run_mpd_watch(config: &MpdConfig, conn: Arc<Mutex<Connection>>, running: 
 
         // Send an initial Metadata event if MPD was already playing when we
         // connected, so the tracker starts accumulating time right away.
+        // Also opportunistically cache the embedded cover for this track.
         if prev.state == "play" && !prev.title.is_empty() {
             send_metadata_event(&prev, &mut tracker);
             last_metadata_file = Some(prev.file.clone());
+            try_extract_cover(&mut mpd_conn, &conn_for_covers, &prev);
         }
 
         // Inner loop: wait for player events, dispatch to tracker.
@@ -647,6 +652,7 @@ pub fn run_mpd_watch(config: &MpdConfig, conn: Arc<Mutex<Connection>>, running: 
             &running,
             &mut prev,
             &mut last_metadata_file,
+            &conn_for_covers,
         );
 
         if !connected {
@@ -676,6 +682,7 @@ fn run_event_loop(
     running: &Arc<AtomicBool>,
     prev: &mut MpdPlayerState,
     last_metadata_file: &mut Option<String>,
+    db_conn: &Arc<Mutex<Connection>>,
 ) -> bool {
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -704,6 +711,12 @@ fn run_event_loop(
 
         // Determine what changed and dispatch the appropriate events.
         dispatch_events(prev, &new, tracker, last_metadata_file);
+
+        // When the playing file changes, opportunistically extract the embedded
+        // cover for the new album if we don't already have one cached.
+        if new.file != prev.file && !new.file.is_empty() && !new.album.is_empty() {
+            try_extract_cover(mpd_conn, db_conn, &new);
+        }
 
         *prev = new;
     }
@@ -832,7 +845,79 @@ fn send_metadata_event(
 }
 
 // ---------------------------------------------------------------------------
-// MPD cover extractor
+// Inline cover extraction (called from the watch loop)
+// ---------------------------------------------------------------------------
+
+/// Opportunistically extract and cache the embedded cover for a track that
+/// just started playing, using the MPD connection that is already open.
+///
+/// This is called from the event loop whenever the playing file changes, so
+/// covers are cached automatically during `watch` without a separate
+/// `enrich --mpd-covers` run.
+///
+/// The function is entirely non-fatal: any failure (no embedded picture,
+/// image decode error, filesystem write failure, etc.) is silently ignored.
+/// The watch loop continues regardless.
+///
+/// Does nothing if the album already has a `cover_url` in `album_cache`.
+fn try_extract_cover(
+    mpd_conn: &mut MpdConn,
+    db_conn: &Arc<Mutex<Connection>>,
+    state: &MpdPlayerState,
+) {
+    // Skip tracks with empty artist or album — we can't build a stable
+    // cache key, and these are typically radio streams or singles.
+    if state.artist.is_empty() || state.album.is_empty() {
+        return;
+    }
+
+    // Check whether this album already has a cover in the cache.
+    // Lock briefly, then release before the potentially slow readpicture.
+    let already_covered = {
+        let locked = db_conn.lock().unwrap();
+        db::album_cache_meta(&locked, &state.artist, &state.album)
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.cover_url.is_some())
+    };
+
+    if already_covered {
+        return;
+    }
+
+    // Ask MPD for the embedded picture bytes via readpicture.
+    let bytes = match read_picture(mpd_conn, &state.file) {
+        Some(b) => b,
+        None => return, // No embedded art — silently skip.
+    };
+
+    // Resize and re-encode to keep the cover consistent with CAA downloads.
+    let processed = match enrich::resize_cover_bytes(&bytes) {
+        Some(b) => b,
+        None => return,
+    };
+
+    // Save the processed image to the covers cache directory.
+    let covers = enrich::covers_dir();
+    let stem = album_cover_stem(&state.artist, &state.album);
+    let dest = covers.join(format!("{}.jpg", stem));
+    if std::fs::write(&dest, &processed).is_err() {
+        return;
+    }
+
+    // Record the local path in album_cache so the report generator finds it.
+    let cover_path = dest.to_string_lossy().to_string();
+    let locked = db_conn.lock().unwrap();
+    if db::set_local_cover(&locked, &state.artist, &state.album, &cover_path).is_ok() {
+        eprintln!(
+            "[mpd] Cover cached for {} — {}",
+            state.artist, state.album
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MPD cover extractor (batch command: enrich --mpd-covers)
 // ---------------------------------------------------------------------------
 
 /// Extract and cache embedded cover art for scrobbled albums using MPD's
