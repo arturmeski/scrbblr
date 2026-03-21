@@ -1,14 +1,18 @@
-//! MPRIS Scrobbler — a local music scrobbler for MPRIS-compatible players.
+//! MPRIS + MPD Scrobbler — a local music scrobbler for Linux.
 //!
-//! This is the CLI entry point. It provides four subcommands:
+//! This is the CLI entry point. It provides five subcommands:
 //!
-//! - `watch` — monitors a player via `playerctl` and records scrobbles to SQLite
-//! - `report` — generates listening statistics from the stored scrobble data
-//! - `enrich` — fetches album art and genre info from MusicBrainz
-//! - `last-scrobble` — prints the newest scrobble timestamp
-//! - `pin-album` — manually assign a MusicBrainz ID to an album the automatic search missed
+//! - `watch` — monitors a player via `playerctl` and/or MPD, recording
+//!   scrobbles to SQLite. Both sources can run simultaneously.
+//! - `report` — generates listening statistics from the stored data
+//! - `enrich` — fetches album art and genre info from MusicBrainz,
+//!   and/or extracts embedded covers from MPD
+//! - `last-scrobble`— prints the newest scrobble timestamp
+//! - `pin-album`    — manually assign a MusicBrainz ID to an album
 //!
 //! ## Architecture overview
+//!
+//! ### MPRIS watcher
 //!
 //! The `watch` command spawns two `playerctl --follow` child processes:
 //!
@@ -28,12 +32,24 @@
 //!   [playerctl status]   ──reader thread──→ ┘
 //! ```
 //!
-//! Ctrl+C triggers a graceful shutdown: the handler sends an `Eof` event
-//! through the channel, causing the tracker to evaluate the last track
-//! before exiting.
+//! ### MPD watcher (optional, enabled with `--mpd`)
+//!
+//! When `--mpd` is passed, a separate thread is spawned that connects to MPD
+//! using the idle protocol. It maintains its own `ScrobbleTracker` and writes
+//! to the same database. The two watchers are fully independent — neither
+//! knows about the other, and no synchronisation is needed between them.
+//!
+//! ```text
+//!   [MPD idle player] ──mpd thread──→ ScrobbleTracker → SQLite (same DB)
+//! ```
+//!
+//! Ctrl+C triggers graceful shutdown of both watchers: the MPRIS watcher
+//! receives an `Eof` event through its channel, and the MPD watcher notices
+//! the shared `running` flag becoming false on its next idle timeout.
 
 mod db;
 mod enrich;
+mod mpd;
 mod report;
 mod watcher;
 
@@ -61,12 +77,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Watch playerctl metadata and scrobble tracks to the local database.
+    /// Watch playerctl metadata and MPD, scrobbling tracks to the local database.
+    ///
+    /// Both watchers are active by default. Use `--no-mpris` or `--no-mpd` to
+    /// disable one of them. Each maintains its own ScrobbleTracker and writes
+    /// directly to the same SQLite database.
     Watch {
-        /// Player name for playerctl (the MPRIS bus name).
+        /// MPRIS player name for playerctl (the D-Bus service name).
         /// Run `playerctl -l` to see available players.
+        /// Omit entirely with `--no-mpris` if you only want to watch MPD.
         #[arg(long, default_value = DEFAULT_PLAYER)]
         player: String,
+
+        /// Disable the MPRIS/playerctl watcher. Use this when you only want
+        /// to scrobble from MPD and do not have playerctl set up.
+        #[arg(long)]
+        no_mpris: bool,
+
+        /// Disable the MPD watcher. MPD scrobbling is on by default;
+        /// pass this flag to run MPRIS-only.
+        #[arg(long)]
+        no_mpd: bool,
+
+        /// MPD server hostname or IP address for TCP connections, or an
+        /// absolute path to a Unix domain socket
+        /// (e.g. `/run/mpd/socket`).
+        #[arg(long, default_value = "localhost")]
+        mpd_host: String,
+
+        /// MPD server TCP port. Ignored when `--mpd-host` is a socket path.
+        #[arg(long, default_value = "6600")]
+        mpd_port: u16,
 
         /// Path to the SQLite database file. If not specified, defaults to
         /// ~/.local/share/mpris-scrobbler/scrobbles.db (respects $XDG_DATA_HOME).
@@ -106,15 +147,39 @@ enum Commands {
         #[arg(long)]
         db_path: Option<String>,
     },
-    /// Fetch album art and genre info from MusicBrainz for all scrobbled albums.
+    /// Fetch album art and genre info for all scrobbled albums.
     ///
-    /// This command looks up each unique (artist, album) pair that doesn't yet
-    /// have cached metadata, queries MusicBrainz for the release, downloads
-    /// cover art from the Cover Art Archive, and stores everything locally.
+    /// Without extra flags, queries MusicBrainz for each unique (artist, album)
+    /// pair that lacks cached metadata and downloads cover art from the Cover
+    /// Art Archive.
+    ///
+    /// With `--mpd-covers`, extracts embedded cover art directly from music
+    /// files via MPD's `readpicture` command — no network access required.
+    /// Run this before the MusicBrainz enrichment so that albums already
+    /// covered locally are not needlessly fetched from the Cover Art Archive.
     Enrich {
-        /// Re-fetch metadata for all albums, even those already cached.
+        /// Re-fetch metadata for all albums from MusicBrainz, even those
+        /// already cached. Does not affect MPD cover extraction.
         #[arg(long)]
         force: bool,
+
+        /// Extract embedded cover art from music files via MPD's
+        /// `readpicture` command. Populates `album_cache.cover_url` for
+        /// albums that have scrobbles but no cover yet. Fast and fully
+        /// offline — covers are read from the music files MPD already has
+        /// access to, without any network requests.
+        #[arg(long)]
+        mpd_covers: bool,
+
+        /// MPD server hostname, IP address, or Unix socket path.
+        /// Used with `--mpd-covers`.
+        #[arg(long, default_value = "localhost")]
+        mpd_host: String,
+
+        /// MPD server TCP port. Used with `--mpd-covers` when connecting
+        /// via TCP (ignored for Unix socket paths).
+        #[arg(long, default_value = "6600")]
+        mpd_port: u16,
 
         /// Path to the SQLite database file. Same default as `watch`.
         #[arg(long)]
@@ -178,113 +243,152 @@ fn default_db_path() -> String {
 // Watch command implementation
 // ---------------------------------------------------------------------------
 
-/// Run the `watch` subcommand: spawn playerctl processes, read events, and
-/// scrobble tracks to the database.
-fn run_watch(player: &str, db_path: &str) {
-    // Open (or create) the database and wrap it in Arc<Mutex<>> for sharing
-    // with the scrobble callback. In practice, only the main thread accesses
-    // it, but the Mutex is needed because the callback closure is FnMut and
-    // could theoretically be called from different contexts.
+/// Run the `watch` subcommand: spawn playerctl processes and/or an MPD watcher,
+/// read events, and scrobble tracks to the database.
+///
+/// # Arguments
+/// - `player` — MPRIS player name passed to playerctl. Ignored when `use_mpris` is `false`.
+/// - `use_mpris` — whether to start the playerctl-based MPRIS watcher.
+/// - `mpd_config` — if `Some`, start an MPD watcher thread in parallel.
+/// - `db_path` — path to the SQLite database file.
+///
+/// Both watchers, when active, share the same `Arc<Mutex<Connection>>`
+/// (scrobble writes are infrequent, so mutex contention is negligible) and
+/// the same `running` flag (both stop on Ctrl+C).
+fn run_watch(player: &str, use_mpris: bool, mpd_config: Option<mpd::MpdConfig>, db_path: &str) {
+    // Open (or create) the database and wrap in Arc<Mutex<>> for sharing
+    // between the MPRIS callback and the MPD watcher thread.
     let conn = db::open_db(db_path).expect("Failed to open database");
     let conn = Arc::new(Mutex::new(conn));
 
     eprintln!("Database: {}", db_path);
-    eprintln!("Watching player: {}", player);
+    if use_mpris {
+        eprintln!("Watching MPRIS player: {}", player);
+    }
+    if mpd_config.is_some() {
+        eprintln!("Watching MPD");
+    }
 
-    // Channel for sending events from reader threads to the main event loop.
+    // Shared shutdown flag. Both the Ctrl+C handler and the MPD watcher thread
+    // observe this flag; when it goes false, each cleans up and returns.
+    let running = Arc::new(AtomicBool::new(true));
+
+    // --- Spawn MPD watcher thread (optional) ---
+    // The MPD thread owns its own ScrobbleTracker and runs its own idle loop.
+    // It writes scrobbles directly to the database via a clone of `conn`.
+    // No shared channel with the MPRIS loop — the two watchers are independent.
+    let mpd_handle = if let Some(mpd_cfg) = mpd_config {
+        let conn_clone = conn.clone();
+        let running_clone = running.clone();
+        Some(thread::spawn(move || {
+            mpd::run_mpd_watch(&mpd_cfg, conn_clone, running_clone);
+        }))
+    } else {
+        None
+    };
+
+    // --- MPRIS watcher (optional) ---
+    // If MPRIS is disabled (--no-mpris), we skip spawning playerctl entirely.
+    // In that case the channel is still created (so the Ctrl+C handler has
+    // a sender), and the main loop exits as soon as the shutdown flag is set.
     let (tx, rx) = mpsc::channel::<watcher::Event>();
 
-    // --- Spawn playerctl metadata follower ---
-    // This process outputs one tab-separated line per track change:
-    //   artist\talbum\ttitle\tmpris:length
-    let metadata_cmd = Command::new("playerctl")
-        .args([
-            "-p",
-            player,
-            "--follow",
-            "metadata",
-            "--format",
-            "{{artist}}\t{{album}}\t{{title}}\t{{mpris:length}}",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
+    // Track how many reader threads have sent Eof so we know when both
+    // playerctl processes have ended. Set to 2 when MPRIS is disabled so the
+    // main loop exits immediately on Ctrl+C (no processes to wait for).
+    let expected_eofs: usize = if use_mpris { 2 } else { 0 };
 
-    let metadata_proc = match metadata_cmd {
-        Ok(proc) => proc,
-        Err(e) => {
-            eprintln!("Failed to spawn playerctl metadata: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let mut meta_handle = None;
+    let mut status_handle = None;
 
-    // --- Spawn playerctl status follower ---
-    // This process outputs one line per state change: "Playing", "Paused", or "Stopped".
-    let status_cmd = Command::new("playerctl")
-        .args(["-p", player, "--follow", "status"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
+    if use_mpris {
+        // --- Spawn playerctl metadata follower ---
+        // Outputs one tab-separated line per track change:
+        //   artist\talbum\ttitle\tmpris:length
+        let metadata_proc = Command::new("playerctl")
+            .args([
+                "-p",
+                player,
+                "--follow",
+                "metadata",
+                "--format",
+                "{{artist}}\t{{album}}\t{{title}}\t{{mpris:length}}",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
 
-    let status_proc = match status_cmd {
-        Ok(proc) => proc,
-        Err(e) => {
-            eprintln!("Failed to spawn playerctl status: {}", e);
-            std::process::exit(1);
-        }
-    };
+        // --- Spawn playerctl status follower ---
+        // Outputs one line per state change: "Playing", "Paused", or "Stopped".
+        let status_proc = Command::new("playerctl")
+            .args(["-p", player, "--follow", "status"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
 
-    // --- Metadata reader thread ---
-    // Reads lines from the metadata process's stdout, parses them into
-    // `Event::Metadata` values, and sends them through the channel.
-    // Sends `Event::Eof` when the process ends (stdout closes).
-    let tx_meta = tx.clone();
-    let meta_handle = thread::spawn(move || {
-        let stdout = metadata_proc
-            .stdout
-            .expect("No stdout for metadata process");
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    if let Some(event) = watcher::parse_metadata_line(&l)
-                        && tx_meta.send(event).is_err()
-                    {
-                        break; // Receiver dropped — shutting down.
+        match (metadata_proc, status_proc) {
+            (Ok(meta_proc), Ok(stat_proc)) => {
+                // --- Metadata reader thread ---
+                // Reads lines from the metadata process stdout, parses them into
+                // `Event::Metadata` values, and sends them through the channel.
+                // Sends `Event::Eof` when the process exits (stdout closes).
+                let tx_meta = tx.clone();
+                meta_handle = Some(thread::spawn(move || {
+                    let stdout = meta_proc.stdout.expect("No stdout for metadata process");
+                    let reader = std::io::BufReader::new(stdout);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(l) => {
+                                if let Some(event) = watcher::parse_metadata_line(&l)
+                                    && tx_meta.send(event).is_err()
+                                {
+                                    break; // Receiver dropped — shutting down.
+                                }
+                            }
+                            Err(_) => break,
+                        }
                     }
+                    let _ = tx_meta.send(watcher::Event::Eof);
+                }));
+
+                // --- Status reader thread ---
+                // Same pattern as the metadata reader, but parses status lines.
+                let tx_status = tx.clone();
+                status_handle = Some(thread::spawn(move || {
+                    let stdout = stat_proc.stdout.expect("No stdout for status process");
+                    let reader = std::io::BufReader::new(stdout);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(l) => {
+                                if let Some(event) = watcher::parse_status_line(&l)
+                                    && tx_status.send(event).is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = tx_status.send(watcher::Event::Eof);
+                }));
+            }
+            (meta_result, _) => {
+                // At least one spawn failed — MPRIS watcher cannot run.
+                // Print the error and send synthetic Eofs so the main loop
+                // below exits cleanly; the MPD watcher (if any) continues.
+                if let Err(e) = meta_result {
+                    eprintln!("[warn] Failed to spawn playerctl: {}", e);
                 }
-                Err(_) => break, // Read error — process likely ended.
+                eprintln!("[warn] MPRIS watcher will be inactive.");
+                let _ = tx.send(watcher::Event::Eof);
+                let _ = tx.send(watcher::Event::Eof);
             }
         }
-        // Signal that this process has ended.
-        let _ = tx_meta.send(watcher::Event::Eof);
-    });
-
-    // --- Status reader thread ---
-    // Same pattern as the metadata reader, but parses status lines instead.
-    let tx_status = tx.clone();
-    let status_handle = thread::spawn(move || {
-        let stdout = status_proc.stdout.expect("No stdout for status process");
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    if let Some(event) = watcher::parse_status_line(&l)
-                        && tx_status.send(event).is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = tx_status.send(watcher::Event::Eof);
-    });
+    }
 
     // --- Ctrl+C handler ---
-    // Sets the `running` flag to false and sends an Eof event to unblock
-    // the main loop, allowing a graceful shutdown that evaluates the last track.
-    let running = Arc::new(AtomicBool::new(true));
+    // Sets the `running` flag to false (which the MPD thread observes) and
+    // sends an Eof event to unblock the MPRIS main loop below.
     let running_clone = running.clone();
     let tx_ctrlc = tx.clone();
     ctrlc::set_handler(move || {
@@ -294,9 +398,10 @@ fn run_watch(player: &str, db_path: &str) {
     })
     .expect("Failed to set Ctrl+C handler");
 
-    // --- Main event loop ---
+    // --- MPRIS main event loop ---
     // Receives events from both reader threads and the Ctrl+C handler,
-    // and feeds them into the ScrobbleTracker state machine.
+    // and feeds them into the MPRIS ScrobbleTracker state machine.
+    // When MPRIS is disabled, this loop exits immediately on shutdown.
     let mut tracker = watcher::create_db_tracker(conn);
     let mut eof_count = 0;
 
@@ -305,9 +410,10 @@ fn run_watch(player: &str, db_path: &str) {
             Ok(event) => {
                 if event == watcher::Event::Eof {
                     eof_count += 1;
-                    // Wait for both child processes to end before shutting down.
-                    // (The Ctrl+C handler also sends Eof, so we may get up to 3.)
-                    if eof_count >= 2 {
+                    // Wait for both playerctl processes to signal completion
+                    // before flushing the last track. The Ctrl+C handler also
+                    // sends one Eof, so we may receive more than `expected_eofs`.
+                    if eof_count >= expected_eofs {
                         tracker.handle_event(watcher::Event::Eof);
                         break;
                     }
@@ -320,17 +426,25 @@ fn run_watch(player: &str, db_path: &str) {
         }
     }
 
-    // Final evaluation: ensure the last track is scrobbled if it qualifies.
-    // This is safe to call even if Eof was already handled above — the tracker
-    // handles the "no current track" case gracefully.
+    // Final flush: safe even if Eof was already handled — the tracker
+    // is a no-op when there is no current track.
     tracker.handle_event(watcher::Event::Eof);
+
+    // Wait for the MPD watcher thread to finish its graceful shutdown.
+    // It will notice `running == false` on the next idle timeout (≤ 500 ms).
+    if let Some(handle) = mpd_handle {
+        let _ = handle.join();
+    }
 
     eprintln!("Goodbye.");
 
-    // Wait for reader threads to finish (they should already be done since
-    // the child processes have ended or been killed).
-    let _ = meta_handle.join();
-    let _ = status_handle.join();
+    // Wait for MPRIS reader threads to finish.
+    if let Some(h) = meta_handle {
+        let _ = h.join();
+    }
+    if let Some(h) = status_handle {
+        let _ = h.join();
+    }
 }
 
 /// Round a value to the nearest multiple of 5.
@@ -494,9 +608,27 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Watch { player, db_path } => {
+        Commands::Watch {
+            player,
+            no_mpris,
+            no_mpd,
+            mpd_host,
+            mpd_port,
+            db_path,
+        } => {
             let path = db_path.unwrap_or_else(default_db_path);
-            run_watch(&player, &path);
+
+            // MPD is on by default; --no-mpd disables it.
+            let mpd_config = if no_mpd {
+                None
+            } else {
+                Some(mpd::MpdConfig {
+                    host: mpd_host,
+                    port: mpd_port,
+                })
+            };
+
+            run_watch(&player, !no_mpris, mpd_config, &path);
         }
         Commands::Report {
             period,
@@ -512,7 +644,13 @@ fn main() {
                 all_time_limit.unwrap_or_else(|| round_to_5((limit as f64 * 2.5).round() as i64));
             run_report(&period, json, html, output.as_deref(), limit, atl, &path);
         }
-        Commands::Enrich { force, db_path } => {
+        Commands::Enrich {
+            force,
+            mpd_covers,
+            mpd_host,
+            mpd_port,
+            db_path,
+        } => {
             let path = db_path.unwrap_or_else(default_db_path);
             let conn = match db::open_db(&path) {
                 Ok(c) => c,
@@ -521,6 +659,20 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+
+            // Run MPD cover extraction first (fast, local, no rate limits).
+            // Pre-populating cover_url means the online enrichment that follows
+            // will skip fetching covers for albums that already have one.
+            if mpd_covers {
+                let mpd_cfg = mpd::MpdConfig {
+                    host: mpd_host,
+                    port: mpd_port,
+                };
+                mpd::run_mpd_cover_enrich(&mpd_cfg, &conn);
+            }
+
+            // Online enrichment: MusicBrainz lookup for MBID + genre, Cover Art
+            // Archive for any albums still missing a cover after the MPD pass.
             enrich::run_enrich(&conn, force, false);
         }
         Commands::LastScrobble { db_path } => {

@@ -309,7 +309,10 @@ fn search_releases(client: &Client, artist: &str, album: &str) -> Vec<String> {
     // returning wrong results at score 85.
     for (idx, variant) in album_variants.iter().take(2).enumerate() {
         if idx > 0 {
-            eprintln!("  Retrying title-only with stripped name: \"{}\"...", variant);
+            eprintln!(
+                "  Retrying title-only with stripped name: \"{}\"...",
+                variant
+            );
         } else {
             eprintln!("  Retrying with title-only search (no artist constraint)...");
         }
@@ -611,14 +614,50 @@ fn fetch_release_group_genre(client: &Client, release_group_id: &str) -> Option<
 /// language names, format codes) that are meaningless as genre labels.
 const TAG_BLOCKLIST: &[&str] = &[
     // Languages
-    "english", "french", "german", "spanish", "italian", "portuguese",
-    "japanese", "korean", "chinese", "russian", "swedish", "norwegian",
-    "danish", "dutch", "polish", "finnish", "czech", "hungarian", "turkish",
-    "arabic", "hebrew", "greek", "romanian", "ukrainian", "catalan",
+    "english",
+    "french",
+    "german",
+    "spanish",
+    "italian",
+    "portuguese",
+    "japanese",
+    "korean",
+    "chinese",
+    "russian",
+    "swedish",
+    "norwegian",
+    "danish",
+    "dutch",
+    "polish",
+    "finnish",
+    "czech",
+    "hungarian",
+    "turkish",
+    "arabic",
+    "hebrew",
+    "greek",
+    "romanian",
+    "ukrainian",
+    "catalan",
     // Technical / format descriptors
-    "isrc", "cd-text", "asin", "barcode", "album", "single", "ep",
-    "compilation", "soundtrack", "live", "instrumental", "digital",
-    "remaster", "remastered", "deluxe", "bonus", "stereo", "mono",
+    "isrc",
+    "cd-text",
+    "asin",
+    "barcode",
+    "album",
+    "single",
+    "ep",
+    "compilation",
+    "soundtrack",
+    "live",
+    "instrumental",
+    "digital",
+    "remaster",
+    "remastered",
+    "deluxe",
+    "bonus",
+    "stereo",
+    "mono",
 ];
 
 /// Return true if a MusicBrainz tag looks like a real genre label.
@@ -704,7 +743,7 @@ fn download_cover_with_fallback(
 /// Returns the processed JPEG bytes, or `None` if decoding or encoding fails.
 /// Images already within the size limit are still re-encoded to JPEG so that
 /// format is consistent regardless of what the Cover Art Archive sent.
-fn resize_cover_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+pub fn resize_cover_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory(bytes).ok()?;
 
     // Downscale only if the image exceeds the target dimension on either axis.
@@ -1010,10 +1049,7 @@ pub fn enrich_by_mbid(
     };
 
     match db::upsert_album_cache(conn, &entry) {
-        Ok(_) => eprintln!(
-            "Pinned \"{}\" by \"{}\" to MBID {}.",
-            album, artist, mbid
-        ),
+        Ok(_) => eprintln!("Pinned \"{}\" by \"{}\" to MBID {}.", album, artist, mbid),
         Err(e) => eprintln!("[error] Failed to update cache: {}", e),
     }
 }

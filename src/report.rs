@@ -1476,9 +1476,7 @@ fn pin_album_cmd(artist: &str, album: &str, mbid: Option<&str>) -> String {
     let a = artist.replace('"', "\\\"");
     let b = album.replace('"', "\\\"");
     let m = mbid.unwrap_or("MBID_HERE");
-    format!(
-        "mpris-scrobbler pin-album --artist \"{a}\" --album \"{b}\" --mbid \"{m}\""
-    )
+    format!("mpris-scrobbler pin-album --artist \"{a}\" --album \"{b}\" --mbid \"{m}\"")
 }
 
 fn html_escape(s: &str) -> String {

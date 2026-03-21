@@ -706,12 +706,29 @@ pub struct AlbumCacheEntry {
     pub fetched_at: String,
 }
 
-/// Insert or update an album_cache entry. Uses INSERT OR REPLACE so that
-/// re-running `enrich` on an already-cached album updates the data.
+/// Insert or update an album_cache entry.
+///
+/// Uses `ON CONFLICT DO UPDATE` (SQLite upsert syntax) rather than
+/// `INSERT OR REPLACE` so that a locally-extracted MPD cover is not
+/// silently discarded when the online enrichment runs later.
+///
+/// Specifically, `cover_url` is updated with `COALESCE(new, existing)`:
+/// if the incoming entry has no cover URL (the online enrichment found
+/// nothing on the Cover Art Archive), the previously stored local cover
+/// (e.g. one extracted from MPD via `readpicture`) is preserved. If the
+/// incoming entry has a cover URL, it takes precedence.
+///
+/// All other fields (`musicbrainz_id`, `genre`, `fetched_at`) are always
+/// overwritten with the new values.
 pub fn upsert_album_cache(conn: &Connection, entry: &AlbumCacheEntry) -> Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO album_cache (artist, album, musicbrainz_id, cover_url, genre, fetched_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO album_cache (artist, album, musicbrainz_id, cover_url, genre, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(artist, album) DO UPDATE SET
+             musicbrainz_id = excluded.musicbrainz_id,
+             cover_url      = COALESCE(excluded.cover_url, cover_url),
+             genre          = excluded.genre,
+             fetched_at     = excluded.fetched_at",
         params![
             entry.artist,
             entry.album,
@@ -722,6 +739,67 @@ pub fn upsert_album_cache(conn: &Connection, entry: &AlbumCacheEntry) -> Result<
         ],
     )?;
     Ok(())
+}
+
+/// Record a locally-extracted cover art path for an (artist, album) pair.
+///
+/// Unlike [`upsert_album_cache`], this function only writes `cover_url`
+/// (and `fetched_at`), leaving `musicbrainz_id` and `genre` unchanged if a
+/// cache row already exists, or NULL if this is the first time we're seeing
+/// this album. It is used by the MPD cover extractor to cache cover art from
+/// embedded file tags before a MusicBrainz lookup has been performed.
+///
+/// A subsequent call to `upsert_album_cache` (from the online enrichment)
+/// will fill in `musicbrainz_id` and `genre` while preserving this cover URL
+/// if no better one is found online.
+pub fn set_local_cover(
+    conn: &Connection,
+    artist: &str,
+    album: &str,
+    cover_path: &str,
+) -> Result<()> {
+    let fetched_at = chrono::Local::now()
+        .naive_local()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+
+    conn.execute(
+        "INSERT INTO album_cache (artist, album, cover_url, fetched_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(artist, album) DO UPDATE SET
+             cover_url  = ?3,
+             fetched_at = ?4",
+        params![artist, album, cover_path, fetched_at],
+    )?;
+    Ok(())
+}
+
+/// Find all (artist, album) pairs that have scrobbles but no `cover_url`
+/// in `album_cache` yet.
+///
+/// Used by the MPD cover extractor to determine which albums need a cover.
+/// Albums whose `album_cache` row already has a non-NULL `cover_url` are
+/// excluded even if `musicbrainz_id` or `genre` are missing — the cover
+/// is the only thing the extractor cares about.
+///
+/// Albums with an empty `album` field are excluded (these are typically
+/// singles or radio streams without proper album tags).
+pub fn albums_without_cover(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT s.artist, s.album
+         FROM scrobbles s
+         LEFT JOIN album_cache c ON s.artist = c.artist AND s.album = c.album
+         WHERE s.album != ''
+           AND (c.id IS NULL OR c.cover_url IS NULL)
+         ORDER BY s.artist, s.album",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(UncachedAlbum {
+            artist: row.get(0)?,
+            album: row.get(1)?,
+        })
+    })?;
+    rows.collect()
 }
 
 /// Cached album metadata returned by [`album_cache_meta`].
@@ -1159,7 +1237,11 @@ mod tests {
         // Without any album_cache entry, both (artist, album) pairs are
         // separate groups — pre-fix behaviour reproduced here.
         let albums_no_cache = top_albums(&conn, "all", 10).unwrap();
-        assert_eq!(albums_no_cache.len(), 2, "without cache: two separate groups");
+        assert_eq!(
+            albums_no_cache.len(),
+            2,
+            "without cache: two separate groups"
+        );
 
         // Pin the album via album_cache for "Choir". The MBID lookup in
         // top_albums will now resolve "Soloist"'s rows to the same MBID.
@@ -1375,6 +1457,167 @@ mod tests {
         assert_eq!(
             artist_cover(&conn, "Artist X", "today").as_deref(),
             Some("covers/new.jpg")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // albums_without_cover
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_albums_without_cover_returns_uncovered() {
+        let conn = open_memory_db().unwrap();
+        seed_db(&conn);
+
+        // No cache entries yet — all albums should appear.
+        let albums = albums_without_cover(&conn).unwrap();
+        // seed_db inserts scrobbles for two distinct albums:
+        //   "††† (Crosses)" and "White Pony"
+        let names: Vec<&str> = albums.iter().map(|a| a.album.as_str()).collect();
+        assert!(names.contains(&"††† (Crosses)"), "got: {:?}", names);
+        assert!(names.contains(&"White Pony"), "got: {:?}", names);
+    }
+
+    #[test]
+    fn test_albums_without_cover_excludes_covered() {
+        let conn = open_memory_db().unwrap();
+        seed_db(&conn);
+
+        // Give "White Pony" a cover.
+        set_local_cover(&conn, "Deftones", "White Pony", "covers/wp.jpg").unwrap();
+
+        let albums = albums_without_cover(&conn).unwrap();
+        let names: Vec<&str> = albums.iter().map(|a| a.album.as_str()).collect();
+
+        // Only the uncovered album should remain.
+        assert!(!names.contains(&"White Pony"), "got: {:?}", names);
+        assert!(names.contains(&"††† (Crosses)"), "got: {:?}", names);
+    }
+
+    // -----------------------------------------------------------------------
+    // set_local_cover
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_local_cover_inserts_new_row() {
+        let conn = open_memory_db().unwrap();
+        seed_db(&conn);
+
+        // Album has no cache row yet.
+        set_local_cover(&conn, "Deftones", "White Pony", "covers/wp.jpg").unwrap();
+
+        let meta = album_cache_meta(&conn, "Deftones", "White Pony")
+            .unwrap()
+            .expect("cache row should exist");
+        assert_eq!(meta.cover_url.as_deref(), Some("covers/wp.jpg"));
+        // musicbrainz_id and genre should be NULL (not set by set_local_cover).
+        assert!(meta.mbid.is_none());
+        assert!(meta.genre.is_none());
+    }
+
+    #[test]
+    fn test_set_local_cover_updates_existing_row() {
+        let conn = open_memory_db().unwrap();
+        seed_db(&conn);
+
+        // Seed an existing cache entry with a genre but no cover.
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("some-mbid".into()),
+                cover_url: None,
+                genre: Some("nu-metal".into()),
+                fetched_at: "2026-01-01T00:00:00".into(),
+            },
+        )
+        .unwrap();
+
+        // Now set the cover via MPD extraction.
+        set_local_cover(&conn, "Deftones", "White Pony", "covers/wp_local.jpg").unwrap();
+
+        let meta = album_cache_meta(&conn, "Deftones", "White Pony")
+            .unwrap()
+            .expect("cache row should exist");
+        // Cover is updated.
+        assert_eq!(meta.cover_url.as_deref(), Some("covers/wp_local.jpg"));
+        // The existing mbid and genre must be preserved — set_local_cover
+        // must not overwrite them.
+        assert_eq!(meta.mbid.as_deref(), Some("some-mbid"));
+        assert_eq!(meta.genre.as_deref(), Some("nu-metal"));
+    }
+
+    // -----------------------------------------------------------------------
+    // upsert_album_cache — COALESCE cover_url preservation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_upsert_preserves_local_cover_when_online_finds_none() {
+        let conn = open_memory_db().unwrap();
+        seed_db(&conn);
+
+        // Step 1: MPD cover extractor sets a local cover.
+        set_local_cover(&conn, "Deftones", "White Pony", "covers/wp_local.jpg").unwrap();
+
+        // Step 2: Online enrichment finds the MBID and genre, but no CAA cover.
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("abc-123".into()),
+                cover_url: None, // no cover from CAA
+                genre: Some("nu-metal, alternative metal".into()),
+                fetched_at: "2026-03-21T12:00:00".into(),
+            },
+        )
+        .unwrap();
+
+        // The local cover must be preserved because COALESCE(NULL, existing) = existing.
+        let meta = album_cache_meta(&conn, "Deftones", "White Pony")
+            .unwrap()
+            .expect("cache row should exist");
+        assert_eq!(
+            meta.cover_url.as_deref(),
+            Some("covers/wp_local.jpg"),
+            "local cover should be preserved when online enrichment finds nothing"
+        );
+        // Genre and MBID should be updated.
+        assert_eq!(meta.mbid.as_deref(), Some("abc-123"));
+        assert!(meta.genre.is_some());
+    }
+
+    #[test]
+    fn test_upsert_replaces_local_cover_when_online_finds_one() {
+        let conn = open_memory_db().unwrap();
+        seed_db(&conn);
+
+        // Step 1: MPD cover extractor sets a local cover.
+        set_local_cover(&conn, "Deftones", "White Pony", "covers/wp_local.jpg").unwrap();
+
+        // Step 2: Online enrichment finds a cover from the Cover Art Archive.
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("abc-123".into()),
+                cover_url: Some("covers/abc-123.jpg".into()), // has CAA cover
+                genre: Some("nu-metal".into()),
+                fetched_at: "2026-03-21T12:00:00".into(),
+            },
+        )
+        .unwrap();
+
+        // The CAA cover takes priority over the local one.
+        let meta = album_cache_meta(&conn, "Deftones", "White Pony")
+            .unwrap()
+            .expect("cache row should exist");
+        assert_eq!(
+            meta.cover_url.as_deref(),
+            Some("covers/abc-123.jpg"),
+            "CAA cover should replace the local cover"
         );
     }
 }
