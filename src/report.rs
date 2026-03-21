@@ -453,15 +453,6 @@ fn truncate_cell(s: &str, width: usize) -> String {
 // Report generation
 // ---------------------------------------------------------------------------
 
-/// Query the database and assemble all sections of the report.
-///
-/// This is the main entry point for report generation. It runs all the
-/// necessary SQL queries for the given period and limit, and returns
-/// a `ReportData` struct ready for rendering.
-///
-/// # Arguments
-/// - `conn`   — SQLite database connection
-/// - `period` — time period filter ("today", "week", "month", "year", "all")
 /// Return the set of `(artist, album)` pairs that will appear anywhere in the
 /// HTML report at the given limits. Used to focus automatic enrichment on
 /// exactly what the report needs rather than the entire scrobble library.
@@ -506,6 +497,16 @@ pub fn albums_needed_for_report(
     pairs
 }
 
+/// Query the database and assemble all sections of the report.
+///
+/// This is the main entry point for report generation. It runs all the
+/// necessary SQL queries for the given period and limit, and returns
+/// a `ReportData` struct ready for rendering.
+///
+/// # Arguments
+///
+/// - `conn`   — SQLite database connection
+/// - `period` — time period filter ("today", "week", "month", "year", "all")
 /// - `limit`  — maximum number of entries in each top-N list
 pub fn gather_report(
     conn: &Connection,

@@ -815,17 +815,8 @@ fn urlencoded(s: &str) -> String {
 // Main enrichment function
 // ---------------------------------------------------------------------------
 
-/// Run the enrichment process: find all uncached albums and fetch their
-/// metadata and cover art from MusicBrainz / Cover Art Archive.
-///
-/// Progress is printed to stderr so the user can see what's happening.
-///
-/// # Arguments
-/// - `conn` — SQLite database connection
-/// - `force` — if true, re-fetch all albums even if already cached
-/// - `quiet` — if true, suppress the "nothing to do" hint (used when called
-///   from `report --html` where the user didn't explicitly ask for enrichment)
 /// Enrich only the albums in `needed` that aren't already cached.
+///
 /// Used by `report --html` so we fetch covers only for what the report
 /// will actually display, rather than the entire scrobble library.
 pub fn run_enrich_targeted(
@@ -848,6 +839,17 @@ pub fn run_enrich_targeted(
     run_enrich_albums(conn, albums, quiet);
 }
 
+/// Run the enrichment process: find all uncached albums and fetch their
+/// metadata and cover art from MusicBrainz / Cover Art Archive.
+///
+/// Progress is printed to stderr so the user can see what's happening.
+///
+/// # Arguments
+///
+/// - `conn` — SQLite database connection
+/// - `force` — if true, re-fetch all albums even if already cached
+/// - `quiet` — if true, suppress the "nothing to do" hint (used when called
+///   from `report --html` where the user didn't explicitly ask for enrichment)
 pub fn run_enrich(conn: &Connection, force: bool, quiet: bool) {
     if force {
         conn.execute("DELETE FROM album_cache", [])

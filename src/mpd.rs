@@ -100,13 +100,13 @@ use crate::watcher::{self, Event, PlayerStatus};
 ///
 /// ```
 /// // Standard localhost installation
-/// let cfg = MpdConfig::default_tcp();
+/// let cfg = MpdConfig { host: "localhost".into(), port: 6600 };
 ///
 /// // Custom port
 /// let cfg = MpdConfig { host: "localhost".into(), port: 6601 };
 ///
 /// // Unix socket (when MPD runs under a different user account)
-/// let cfg = MpdConfig { host: "/run/user/1000/mpd/socket".into(), port: 0 };
+/// let cfg = MpdConfig { host: "/run/mpd/socket".into(), port: 0 };
 /// ```
 #[derive(Debug, Clone)]
 pub struct MpdConfig {
@@ -578,17 +578,17 @@ impl MpdPlayerState {
     }
 }
 
-/// Run the MPD watcher loop. This function blocks until `running` is set to
-/// `false` (e.g. by a Ctrl+C handler) or MPD becomes persistently unreachable.
+/// Run the MPD watcher reconnect-and-event loop.
+///
+/// Connects to MPD, then loops waiting for player events. If the connection
+/// drops (MPD restarted, network hiccup), waits 5 seconds and reconnects
+/// automatically. Blocks until `running` is set to `false` (e.g. by a
+/// Ctrl+C handler), at which point it flushes any in-progress scrobble
+/// and returns.
 ///
 /// It maintains its own [`watcher::ScrobbleTracker`] backed by the supplied
 /// database connection. Scrobbles are written to the same SQLite database as
 /// the MPRIS watcher, so the two sources appear together in reports.
-///
-/// ## Reconnection
-///
-/// If the MPD connection drops (MPD restarted, network hiccup), this function
-/// waits 5 seconds and retries. It gives up after the shutdown flag is set.
 pub fn run_mpd_watch(config: &MpdConfig, conn: Arc<Mutex<Connection>>, running: Arc<AtomicBool>) {
     eprintln!(
         "[mpd] Connecting to MPD at {}{}",
@@ -692,7 +692,7 @@ fn run_event_loop(
         // either get the player event or the shutdown flag is set.
         let changed = wait_for_idle_response(mpd_conn, running);
         match changed {
-            IdleResult::PlayerChanged => {}
+            IdleResult::Wakeup => {}
             IdleResult::Shutdown => return true,
             IdleResult::ConnectionLost => return false,
         }
@@ -711,7 +711,11 @@ fn run_event_loop(
 
 /// The three possible outcomes of waiting for an MPD idle response.
 enum IdleResult {
-    PlayerChanged,
+    /// The idle wait ended and state should be re-queried. This covers both
+    /// the normal case (`changed: player` received) and the degenerate case
+    /// where MPD returns `OK` without a `changed` line (e.g., a different
+    /// subsystem fired despite `idle player` — unusual but handled safely).
+    Wakeup,
     Shutdown,
     ConnectionLost,
 }
@@ -722,27 +726,26 @@ enum IdleResult {
 /// Because the socket has a 500 ms read timeout, `read_line` returns a
 /// `TimedOut`/`WouldBlock` error periodically. We use those timeouts to check
 /// the shutdown flag without blocking for the full duration of a track.
+///
+/// Returns [`IdleResult::Wakeup`] when the response terminates — regardless
+/// of whether a `changed: player` line appeared. In both cases the caller
+/// re-queries MPD state, so the distinction doesn't matter.
 fn wait_for_idle_response(conn: &mut MpdConn, running: &Arc<AtomicBool>) -> IdleResult {
-    let mut saw_changed_player = false;
-
     loop {
         let mut line = String::new();
         match conn.reader.read_line(&mut line) {
             Ok(0) => return IdleResult::ConnectionLost, // EOF
             Ok(_) => {
                 let trimmed = line.trim();
-                if trimmed == "changed: player" {
-                    saw_changed_player = true;
-                } else if trimmed == "OK" {
-                    // End of idle response — if we saw "changed: player", report it.
-                    if saw_changed_player {
-                        return IdleResult::PlayerChanged;
-                    }
-                    // "OK" with no "changed: player" means the idle was cancelled
-                    // without a relevant event (e.g., a different subsystem changed).
-                    // Re-enter idle by returning and letting the outer loop retry.
-                    return IdleResult::PlayerChanged; // Re-query state regardless.
+                if trimmed == "OK" {
+                    // End of idle response — re-query state regardless of whether
+                    // "changed: player" appeared. With `idle player` the line
+                    // should always appear, but if it's absent (degenerate case)
+                    // a spurious re-query is harmless.
+                    return IdleResult::Wakeup;
                 }
+                // "changed: player" and any other key/value lines are consumed
+                // and discarded here — we query currentsong/status ourselves.
             }
             Err(ref e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>

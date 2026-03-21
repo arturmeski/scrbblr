@@ -32,9 +32,9 @@
 //!   [playerctl status]   ──reader thread──→ ┘
 //! ```
 //!
-//! ### MPD watcher (optional, enabled with `--mpd`)
+//! ### MPD watcher (on by default, disabled with `--no-mpd`)
 //!
-//! When `--mpd` is passed, a separate thread is spawned that connects to MPD
+//! Unless `--no-mpd` is passed, a separate thread is spawned that connects to MPD
 //! using the idle protocol. It maintains its own `ScrobbleTracker` and writes
 //! to the same database. The two watchers are fully independent — neither
 //! knows about the other, and no synchronisation is needed between them.
@@ -404,6 +404,7 @@ fn run_watch(player: &str, use_mpris: bool, mpd_config: Option<mpd::MpdConfig>, 
     // When MPRIS is disabled, this loop exits immediately on shutdown.
     let mut tracker = watcher::create_db_tracker(conn);
     let mut eof_count = 0;
+    let mut flushed = false;
 
     while running.load(Ordering::SeqCst) {
         match rx.recv() {
@@ -415,6 +416,7 @@ fn run_watch(player: &str, use_mpris: bool, mpd_config: Option<mpd::MpdConfig>, 
                     // sends one Eof, so we may receive more than `expected_eofs`.
                     if eof_count >= expected_eofs {
                         tracker.handle_event(watcher::Event::Eof);
+                        flushed = true;
                         break;
                     }
                     continue;
@@ -426,9 +428,11 @@ fn run_watch(player: &str, use_mpris: bool, mpd_config: Option<mpd::MpdConfig>, 
         }
     }
 
-    // Final flush: safe even if Eof was already handled — the tracker
-    // is a no-op when there is no current track.
-    tracker.handle_event(watcher::Event::Eof);
+    // Final flush in case the loop exited via channel disconnect rather than
+    // the normal Eof path above (e.g., all senders dropped simultaneously).
+    if !flushed {
+        tracker.handle_event(watcher::Event::Eof);
+    }
 
     // Wait for the MPD watcher thread to finish its graceful shutdown.
     // It will notice `running == false` on the next idle timeout (≤ 500 ms).
