@@ -960,10 +960,7 @@ pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
     let mut mpd_conn = match connect(config) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!(
-                "[error] Could not connect to MPD for cover extraction: {}",
-                e
-            );
+            eprintln!("[warn] MPD unreachable, skipping cover extraction: {}", e);
             return;
         }
     };

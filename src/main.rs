@@ -149,35 +149,38 @@ enum Commands {
     },
     /// Fetch album art and genre info for all scrobbled albums.
     ///
-    /// Without extra flags, queries MusicBrainz for each unique (artist, album)
-    /// pair that lacks cached metadata and downloads cover art from the Cover
-    /// Art Archive.
+    /// By default, connects to MPD and extracts embedded cover art from music
+    /// files via `readpicture` — fully offline, no network access required.
+    /// Pass `--no-mpd-covers` to skip this step.
     ///
-    /// With `--mpd-covers`, extracts embedded cover art directly from music
-    /// files via MPD's `readpicture` command — no network access required.
-    /// Run this before the MusicBrainz enrichment so that albums already
-    /// covered locally are not needlessly fetched from the Cover Art Archive.
+    /// Pass `--online` to also query MusicBrainz for album metadata (MBID,
+    /// genre) and download cover art from the Cover Art Archive for albums
+    /// that still have no cover after the local extraction step.
     Enrich {
+        /// Query MusicBrainz for album metadata (MBID, genre) and download
+        /// cover art from the Cover Art Archive for albums that still have
+        /// no cover after local extraction.
+        #[arg(long)]
+        online: bool,
+
         /// Re-fetch metadata for all albums from MusicBrainz, even those
-        /// already cached. Does not affect MPD cover extraction.
+        /// already cached. Only meaningful together with `--online`.
         #[arg(long)]
         force: bool,
 
-        /// Extract embedded cover art from music files via MPD's
-        /// `readpicture` command. Populates `album_cache.cover_url` for
-        /// albums that have scrobbles but no cover yet. Fast and fully
-        /// offline — covers are read from the music files MPD already has
-        /// access to, without any network requests.
+        /// Disable the MPD embedded cover extraction step. By default,
+        /// `enrich` connects to MPD and extracts embedded cover art from
+        /// music files via `readpicture` before doing anything else.
         #[arg(long)]
-        mpd_covers: bool,
+        no_mpd_covers: bool,
 
         /// MPD server hostname, IP address, or Unix socket path.
-        /// Used with `--mpd-covers`.
+        /// Used for embedded cover extraction (unless `--no-mpd-covers`).
         #[arg(long, default_value = "localhost")]
         mpd_host: String,
 
-        /// MPD server TCP port. Used with `--mpd-covers` when connecting
-        /// via TCP (ignored for Unix socket paths).
+        /// MPD server TCP port. Used for embedded cover extraction when
+        /// connecting via TCP (ignored for Unix socket paths).
         #[arg(long, default_value = "6600")]
         mpd_port: u16,
 
@@ -649,12 +652,20 @@ fn main() {
             run_report(&period, json, html, output.as_deref(), limit, atl, &path);
         }
         Commands::Enrich {
+            online,
             force,
-            mpd_covers,
+            no_mpd_covers,
             mpd_host,
             mpd_port,
             db_path,
         } => {
+            if no_mpd_covers && !online {
+                eprintln!("Nothing to do. Pass --online and/or omit --no-mpd-covers.");
+                eprintln!("  (default)      Extract embedded covers from music files via MPD (offline)");
+                eprintln!("  --online       Fetch metadata and covers from MusicBrainz / Cover Art Archive");
+                std::process::exit(0);
+            }
+
             let path = db_path.unwrap_or_else(default_db_path);
             let conn = match db::open_db(&path) {
                 Ok(c) => c,
@@ -667,7 +678,7 @@ fn main() {
             // Run MPD cover extraction first (fast, local, no rate limits).
             // Pre-populating cover_url means the online enrichment that follows
             // will skip fetching covers for albums that already have one.
-            if mpd_covers {
+            if !no_mpd_covers {
                 let mpd_cfg = mpd::MpdConfig {
                     host: mpd_host,
                     port: mpd_port,
@@ -677,7 +688,9 @@ fn main() {
 
             // Online enrichment: MusicBrainz lookup for MBID + genre, Cover Art
             // Archive for any albums still missing a cover after the MPD pass.
-            enrich::run_enrich(&conn, force, false);
+            if online {
+                enrich::run_enrich(&conn, force, false);
+            }
         }
         Commands::LastScrobble { db_path } => {
             let path = db_path.unwrap_or_else(default_db_path);
