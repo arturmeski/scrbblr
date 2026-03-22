@@ -851,30 +851,12 @@ pub fn set_local_cover(
 ///
 /// Albums with an empty `album` field are excluded (these are typically
 /// singles or radio streams without proper album tags).
-pub fn albums_without_cover(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT s.artist, s.album
-         FROM scrobbles s
-         LEFT JOIN album_cache c ON s.artist = c.artist AND s.album = c.album
-         WHERE s.album != ''
-           AND (c.id IS NULL OR c.cover_url IS NULL)
-         ORDER BY s.artist, s.album",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(UncachedAlbum {
-            artist: row.get(0)?,
-            album: row.get(1)?,
-        })
-    })?;
-    rows.collect()
-}
-
-/// Like [`albums_without_cover`] but restricted to albums where at least one
-/// scrobble came from MPD (`source = 'MPD'`).
+/// Returns albums where at least one scrobble came from MPD (`source = 'MPD'`)
+/// and that still have no `cover_url` in `album_cache`.
 ///
-/// There is no point asking MPD for a cover art of an album that was scrobbled
-/// entirely via an MPRIS player (e.g. Qobuz, Spotify) — MPD almost certainly
-/// does not have that file on disk. This query avoids those wasted round-trips.
+/// Scoping to MPD-sourced albums avoids pointless `readpicture` requests for
+/// albums scrobbled exclusively via MPRIS players (e.g. Qobuz, Spotify) that
+/// MPD almost certainly does not have on disk.
 pub fn albums_without_cover_from_mpd(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT s.artist, s.album
@@ -997,6 +979,17 @@ pub fn artist_top_album(conn: &Connection, artist: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Format today's date with the given HH:MM:SS component.
+    fn today_at(hms: &str) -> String {
+        format!("{}T{}", chrono::Local::now().format("%Y-%m-%d"), hms)
+    }
+
+    /// Format a date N days in the past with the given HH:MM:SS component.
+    fn days_ago_at(days: i64, hms: &str) -> String {
+        let dt = chrono::Local::now() - chrono::Duration::days(days);
+        format!("{}T{}", dt.format("%Y-%m-%d"), hms)
+    }
+
     /// Populate an in-memory database with a mix of test data:
     /// - 3 scrobbles for ††† (Crosses) across two days
     /// - 2 scrobbles for Deftones
@@ -1010,7 +1003,7 @@ mod tests {
                 title: "This Is a Trick".to_string(),
                 track_duration_secs: Some(186),
                 played_duration_secs: 186,
-                scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                scrobbled_at: today_at("10:00:00"),
                 source: "test".into(),
             },
             NewScrobble {
@@ -1019,7 +1012,7 @@ mod tests {
                 title: "Telepathy".to_string(),
                 track_duration_secs: Some(215),
                 played_duration_secs: 200,
-                scrobbled_at: "2026-03-19T10:05:00".to_string(),
+                scrobbled_at: today_at("10:05:00"),
                 source: "test".into(),
             },
             NewScrobble {
@@ -1028,7 +1021,7 @@ mod tests {
                 title: "Digital Bath".to_string(),
                 track_duration_secs: Some(291),
                 played_duration_secs: 291,
-                scrobbled_at: "2026-03-19T10:10:00".to_string(),
+                scrobbled_at: today_at("10:10:00"),
                 source: "test".into(),
             },
             NewScrobble {
@@ -1037,7 +1030,7 @@ mod tests {
                 title: "Knife Prty".to_string(),
                 track_duration_secs: Some(290),
                 played_duration_secs: 250,
-                scrobbled_at: "2026-03-18T14:00:00".to_string(),
+                scrobbled_at: days_ago_at(1, "14:00:00"),
                 source: "test".into(),
             },
             NewScrobble {
@@ -1046,7 +1039,7 @@ mod tests {
                 title: "This Is a Trick".to_string(),
                 track_duration_secs: Some(186),
                 played_duration_secs: 180,
-                scrobbled_at: "2026-03-12T09:00:00".to_string(),
+                scrobbled_at: days_ago_at(7, "09:00:00"),
                 source: "test".into(),
             },
         ];
@@ -1072,7 +1065,7 @@ mod tests {
             title: "This Is a Trick".to_string(),
             track_duration_secs: Some(186),
             played_duration_secs: 186,
-            scrobbled_at: "2026-03-19T10:00:00".to_string(),
+            scrobbled_at: today_at("10:00:00"),
                 source: "test".into(),
         };
         // First insert should get row ID 1.
@@ -1137,7 +1130,7 @@ mod tests {
                 musicbrainz_id: None,
                 cover_url: None,
                 genre: Some("darkwave, electronic".to_string()),
-                fetched_at: "2026-03-19T12:00:00".to_string(),
+                fetched_at: today_at("12:00:00"),
             },
         )
         .unwrap();
@@ -1149,7 +1142,7 @@ mod tests {
                 musicbrainz_id: None,
                 cover_url: None,
                 genre: Some("alternative metal".to_string()),
-                fetched_at: "2026-03-19T12:00:00".to_string(),
+                fetched_at: today_at("12:00:00"),
             },
         )
         .unwrap();
@@ -1175,7 +1168,7 @@ mod tests {
                 title: "T1".to_string(),
                 track_duration_secs: Some(200),
                 played_duration_secs: 200,
-                scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                scrobbled_at: today_at("10:00:00"),
                 source: "test".into(),
             },
         )
@@ -1188,7 +1181,7 @@ mod tests {
                 title: "T2".to_string(),
                 track_duration_secs: Some(180),
                 played_duration_secs: 180,
-                scrobbled_at: "2026-03-19T10:01:00".to_string(),
+                scrobbled_at: today_at("10:01:00"),
                 source: "test".into(),
             },
         )
@@ -1204,7 +1197,7 @@ mod tests {
                 musicbrainz_id: None,
                 cover_url: None,
                 genre: Some("post-rock".to_string()),
-                fetched_at: "2026-03-19T12:00:00".to_string(),
+                fetched_at: today_at("12:00:00"),
             },
         )
         .unwrap();
@@ -1216,7 +1209,7 @@ mod tests {
                 musicbrainz_id: None,
                 cover_url: None,
                 genre: Some("post rock".to_string()),
-                fetched_at: "2026-03-19T12:00:01".to_string(),
+                fetched_at: today_at("12:00:01"),
             },
         )
         .unwrap();
@@ -1242,7 +1235,7 @@ mod tests {
                 title: "Short".to_string(),
                 track_duration_secs: Some(120),
                 played_duration_secs: 120,
-                scrobbled_at: "2026-03-19T11:00:00".to_string(),
+                scrobbled_at: today_at("11:00:00"),
                 source: "test".into(),
             },
         )
@@ -1255,7 +1248,7 @@ mod tests {
                 title: "Long".to_string(),
                 track_duration_secs: Some(320),
                 played_duration_secs: 320,
-                scrobbled_at: "2026-03-19T11:05:00".to_string(),
+                scrobbled_at: today_at("11:05:00"),
                 source: "test".into(),
             },
         )
@@ -1282,7 +1275,7 @@ mod tests {
                 title: "One".to_string(),
                 track_duration_secs: Some(150),
                 played_duration_secs: 150,
-                scrobbled_at: "2026-03-19T12:00:00".to_string(),
+                scrobbled_at: today_at("12:00:00"),
                 source: "test".into(),
             },
         )
@@ -1295,7 +1288,7 @@ mod tests {
                 title: "Two".to_string(),
                 track_duration_secs: Some(240),
                 played_duration_secs: 240,
-                scrobbled_at: "2026-03-19T12:05:00".to_string(),
+                scrobbled_at: today_at("12:05:00"),
                 source: "test".into(),
             },
         )
@@ -1319,10 +1312,13 @@ mod tests {
         let album = "Vivaldi: Gloria; Nisi Dominus";
 
         // Three tracks: two with artist A, one with artist B. Same album name.
+        let ts1 = today_at("10:00:00");
+        let ts2 = today_at("10:05:00");
+        let ts3 = today_at("10:10:00");
         for (artist, ts) in &[
-            ("Choir", "2026-03-19T10:00:00"),
-            ("Choir", "2026-03-19T10:05:00"),
-            ("Soloist", "2026-03-19T10:10:00"),
+            ("Choir", ts1.as_str()),
+            ("Choir", ts2.as_str()),
+            ("Soloist", ts3.as_str()),
         ] {
             insert_scrobble(
                 &conn,
@@ -1358,7 +1354,7 @@ mod tests {
                 musicbrainz_id: Some("test-mbid-vivaldi".to_string()),
                 cover_url: Some("covers/test.jpg".to_string()),
                 genre: Some("classical".to_string()),
-                fetched_at: "2026-03-19T12:00:00".to_string(),
+                fetched_at: today_at("12:00:00"),
             },
         )
         .unwrap();
@@ -1385,7 +1381,7 @@ mod tests {
                 title: "Brief".to_string(),
                 track_duration_secs: Some(100),
                 played_duration_secs: 100,
-                scrobbled_at: "2026-03-19T13:00:00".to_string(),
+                scrobbled_at: today_at("13:00:00"),
                 source: "test".into(),
             },
         )
@@ -1398,7 +1394,7 @@ mod tests {
                 title: "Epic".to_string(),
                 track_duration_secs: Some(360),
                 played_duration_secs: 360,
-                scrobbled_at: "2026-03-19T13:05:00".to_string(),
+                scrobbled_at: today_at("13:05:00"),
                 source: "test".into(),
             },
         )
@@ -1419,7 +1415,7 @@ mod tests {
         let recent = recent_scrobbles(&conn, "all", 3).unwrap();
         assert_eq!(recent.len(), 3);
         // Results are ordered by scrobbled_at DESC — most recent first.
-        assert_eq!(recent[0].scrobbled_at, "2026-03-19T10:10:00");
+        assert_eq!(recent[0].scrobbled_at, today_at("10:10:00"));
     }
 
     #[test]
@@ -1444,7 +1440,7 @@ mod tests {
             title: "Mystery".to_string(),
             track_duration_secs: None,
             played_duration_secs: 240,
-            scrobbled_at: "2026-03-19T12:00:00".to_string(),
+            scrobbled_at: today_at("12:00:00"),
                 source: "test".into(),
         };
         insert_scrobble(&conn, &s).unwrap();
@@ -1466,7 +1462,7 @@ mod tests {
                 title: "T1".to_string(),
                 track_duration_secs: Some(100),
                 played_duration_secs: 100,
-                scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                scrobbled_at: today_at("10:00:00"),
                 source: "test".into(),
             },
         )
@@ -1479,15 +1475,16 @@ mod tests {
                 title: "T2".to_string(),
                 track_duration_secs: Some(120),
                 played_duration_secs: 120,
-                scrobbled_at: "2026-03-19T12:34:56".to_string(),
+                scrobbled_at: today_at("12:34:56"),
                 source: "test".into(),
             },
         )
         .unwrap();
 
+        let expected = today_at("12:34:56");
         assert_eq!(
             latest_scrobble_at(&conn).unwrap().as_deref(),
-            Some("2026-03-19T12:34:56")
+            Some(expected.as_str())
         );
     }
 
@@ -1573,37 +1570,95 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // albums_without_cover
+    // albums_without_cover_from_mpd
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_albums_without_cover_returns_uncovered() {
+    fn test_albums_without_cover_from_mpd_returns_uncovered() {
         let conn = open_memory_db().unwrap();
-        seed_db(&conn);
+        // Seed with MPD-sourced scrobbles so the query can find them.
+        for (artist, album, title) in &[
+            ("††† (Crosses)", "††† (Crosses)", "This Is a Trick"),
+            ("Deftones", "White Pony", "Digital Bath"),
+        ] {
+            insert_scrobble(
+                &conn,
+                &NewScrobble {
+                    artist: artist.to_string(),
+                    album: album.to_string(),
+                    title: title.to_string(),
+                    track_duration_secs: Some(200),
+                    played_duration_secs: 200,
+                    scrobbled_at: today_at("10:00:00"),
+                    source: "MPD".to_string(),
+                },
+            )
+            .unwrap();
+        }
 
-        // No cache entries yet — all albums should appear.
-        let albums = albums_without_cover(&conn).unwrap();
-        // seed_db inserts scrobbles for two distinct albums:
-        //   "††† (Crosses)" and "White Pony"
+        // No cache entries yet — both MPD-sourced albums should appear.
+        let albums = albums_without_cover_from_mpd(&conn).unwrap();
         let names: Vec<&str> = albums.iter().map(|a| a.album.as_str()).collect();
         assert!(names.contains(&"††† (Crosses)"), "got: {:?}", names);
         assert!(names.contains(&"White Pony"), "got: {:?}", names);
     }
 
     #[test]
-    fn test_albums_without_cover_excludes_covered() {
+    fn test_albums_without_cover_from_mpd_excludes_covered() {
         let conn = open_memory_db().unwrap();
-        seed_db(&conn);
+        for (artist, album, title) in &[
+            ("††† (Crosses)", "††† (Crosses)", "This Is a Trick"),
+            ("Deftones", "White Pony", "Digital Bath"),
+        ] {
+            insert_scrobble(
+                &conn,
+                &NewScrobble {
+                    artist: artist.to_string(),
+                    album: album.to_string(),
+                    title: title.to_string(),
+                    track_duration_secs: Some(200),
+                    played_duration_secs: 200,
+                    scrobbled_at: today_at("10:00:00"),
+                    source: "MPD".to_string(),
+                },
+            )
+            .unwrap();
+        }
 
-        // Give "White Pony" a cover.
+        // Give "White Pony" a cover — it should drop out of the results.
         set_local_cover(&conn, "Deftones", "White Pony", "covers/wp.jpg").unwrap();
 
-        let albums = albums_without_cover(&conn).unwrap();
+        let albums = albums_without_cover_from_mpd(&conn).unwrap();
         let names: Vec<&str> = albums.iter().map(|a| a.album.as_str()).collect();
-
-        // Only the uncovered album should remain.
         assert!(!names.contains(&"White Pony"), "got: {:?}", names);
         assert!(names.contains(&"††† (Crosses)"), "got: {:?}", names);
+    }
+
+    #[test]
+    fn test_albums_without_cover_from_mpd_excludes_non_mpd() {
+        let conn = open_memory_db().unwrap();
+        // Scrobble an album via a non-MPD source — should not appear.
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Tourist".to_string(),
+                album: "Inside Out".to_string(),
+                title: "Inside Out".to_string(),
+                track_duration_secs: Some(300),
+                played_duration_secs: 300,
+                scrobbled_at: today_at("10:00:00"),
+                source: "Qobuz".to_string(),
+            },
+        )
+        .unwrap();
+
+        let albums = albums_without_cover_from_mpd(&conn).unwrap();
+        let names: Vec<&str> = albums.iter().map(|a| a.album.as_str()).collect();
+        assert!(
+            !names.contains(&"Inside Out"),
+            "Qobuz album should not appear: {:?}",
+            names
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1641,7 +1696,7 @@ mod tests {
                 musicbrainz_id: Some("some-mbid".into()),
                 cover_url: None,
                 genre: Some("nu-metal".into()),
-                fetched_at: "2026-01-01T00:00:00".into(),
+                fetched_at: days_ago_at(90, "00:00:00"),
             },
         )
         .unwrap();
@@ -1681,7 +1736,7 @@ mod tests {
                 musicbrainz_id: Some("abc-123".into()),
                 cover_url: None, // no cover from CAA
                 genre: Some("nu-metal, alternative metal".into()),
-                fetched_at: "2026-03-21T12:00:00".into(),
+                fetched_at: today_at("12:00:00"),
             },
         )
         .unwrap();
@@ -1717,7 +1772,7 @@ mod tests {
                 musicbrainz_id: Some("abc-123".into()),
                 cover_url: Some("covers/abc-123.jpg".into()), // has CAA cover
                 genre: Some("nu-metal".into()),
-                fetched_at: "2026-03-21T12:00:00".into(),
+                fetched_at: today_at("12:00:00"),
             },
         )
         .unwrap();
