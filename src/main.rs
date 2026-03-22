@@ -167,8 +167,9 @@ enum Commands {
     /// Pass `--no-mpd-covers` to skip this step.
     ///
     /// Pass `--online` to also query MusicBrainz for album metadata (MBID,
-    /// genre) and download cover art from the Cover Art Archive for albums
-    /// that still have no cover after the local extraction step.
+    /// genre) and download cover art. Cover art is sourced from iTunes first
+    /// (fast, no rate limit), then the Cover Art Archive as fallback. Pass
+    /// `--no-itunes` to skip iTunes and use only the Cover Art Archive.
     Enrich {
         /// Query MusicBrainz for album metadata (MBID, genre) and download
         /// cover art from the Cover Art Archive for albums that still have
@@ -187,6 +188,12 @@ enum Commands {
         /// albums that already have a cover.
         #[arg(long)]
         retry_covers: bool,
+
+        /// Skip the iTunes Search API when fetching cover art. Falls back
+        /// directly to the Cover Art Archive (CAA). Useful if you prefer
+        /// open-data sources or iTunes results are poor for your library.
+        #[arg(long)]
+        no_itunes: bool,
 
         /// Disable the MPD embedded cover extraction step. By default,
         /// `enrich` connects to MPD and extracts embedded cover art from
@@ -546,9 +553,10 @@ fn run_report(
 
         // Step 2: Online enrichment for albums in `needed` that still have no
         // cover after the MPD pass (e.g. streams, albums not in the MPD DB).
+        // iTunes is tried first (fast, no rate limit), then CAA as fallback.
         // Respects the 7-day cooldown so we don't hammer MusicBrainz on every
         // report run.
-        enrich::run_enrich_targeted(&conn, &needed, true);
+        enrich::run_enrich_targeted(&conn, &needed, true, false);
     }
 
     if html {
@@ -701,6 +709,7 @@ fn main() {
             online,
             force,
             retry_covers,
+            no_itunes,
             no_mpd_covers,
             mpd_host,
             mpd_port,
@@ -709,7 +718,7 @@ fn main() {
             if no_mpd_covers && !online {
                 eprintln!("Nothing to do. Pass --online and/or omit --no-mpd-covers.");
                 eprintln!("  (default)      Extract embedded covers from music files via MPD (offline)");
-                eprintln!("  --online       Fetch metadata and covers from MusicBrainz / Cover Art Archive");
+                eprintln!("  --online       Fetch metadata and covers from MusicBrainz / iTunes / CAA");
                 std::process::exit(0);
             }
 
@@ -745,7 +754,7 @@ fn main() {
             }
 
             if online {
-                enrich::run_enrich(&conn, force, false);
+                enrich::run_enrich(&conn, force, false, no_itunes);
             }
         }
         Commands::LastScrobble { db_path } => {

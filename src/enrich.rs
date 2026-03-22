@@ -10,9 +10,12 @@
 //!
 //! 1. Queries the database for all unique (artist, album) pairs that don't
 //!    yet have an entry in `album_cache`.
-//! 2. For each, searches the MusicBrainz API for matching releases.
-//! 3. If found, fetches genre/tag information from MusicBrainz.
-//! 4. Downloads the front cover image from the Cover Art Archive, trying:
+//! 2. For each, searches MusicBrainz for matching releases (to get MBID and
+//!    genre/tag data — always done regardless of cover source).
+//! 3. Tries iTunes Search API first for cover art (fast, no rate limit,
+//!    good commercial coverage). Pass `--no-itunes` to skip.
+//! 4. If iTunes has no cover (or `--no-itunes`), falls back to the Cover Art
+//!    Archive using the MBID from step 2:
 //!    a. The specific release endpoint
 //!    b. The release-group endpoint (covers any edition of the album)
 //!    c. Other candidate releases from the search results
@@ -23,6 +26,7 @@
 //! MusicBrainz requires a maximum of 1 request per second. We enforce this
 //! by sleeping between API calls. The Cover Art Archive has no documented
 //! rate limit, but we apply the same 1 req/sec policy to be a good citizen.
+//! iTunes has no documented rate limit and is not throttled.
 //!
 //! ## API endpoints used
 //!
@@ -32,16 +36,16 @@
 //! - MusicBrainz release details (for tags/genres and release-group ID):
 //!   `https://musicbrainz.org/ws/2/release/{mbid}?inc=genres+tags+release-groups&fmt=json`
 //!
-//! - Cover Art Archive (release-specific):
-//!   `https://coverartarchive.org/release/{mbid}/front`
-//!
-//! - Cover Art Archive (release-group, any edition):
-//!   `https://coverartarchive.org/release-group/{rgid}/front`
-//!
-//! - iTunes Search API (fallback when CAA has no cover):
+//! - iTunes Search API (primary cover source):
 //!   `https://itunes.apple.com/search?term={artist}+{album}&entity=album&limit=5`
 //!   Returns `artworkUrl100`; the dimension suffix is bumped to `600x600bb`
 //!   before downloading. No authentication required.
+//!
+//! - Cover Art Archive (release-specific, fallback):
+//!   `https://coverartarchive.org/release/{mbid}/front`
+//!
+//! - Cover Art Archive (release-group, any edition, fallback):
+//!   `https://coverartarchive.org/release-group/{rgid}/front`
 //!
 //! ## User-Agent
 //!
@@ -883,6 +887,7 @@ pub fn run_enrich_targeted(
     conn: &Connection,
     needed: &std::collections::HashSet<(String, String)>,
     quiet: bool,
+    no_itunes: bool,
 ) {
     let all_uncached = match db::uncached_albums(conn) {
         Ok(v) => v,
@@ -896,11 +901,11 @@ pub fn run_enrich_targeted(
         .into_iter()
         .filter(|a| needed.contains(&(a.artist.clone(), a.album.clone())))
         .collect();
-    run_enrich_albums(conn, albums, quiet);
+    run_enrich_albums(conn, albums, quiet, no_itunes);
 }
 
 /// Run the enrichment process: find all uncached albums and fetch their
-/// metadata and cover art from MusicBrainz / Cover Art Archive.
+/// metadata and cover art from MusicBrainz and iTunes / Cover Art Archive.
 ///
 /// Progress is printed to stderr so the user can see what's happening.
 ///
@@ -910,18 +915,19 @@ pub fn run_enrich_targeted(
 /// - `force` — if true, re-fetch all albums even if already cached
 /// - `quiet` — if true, suppress the "nothing to do" hint (used when called
 ///   from `report --html` where the user didn't explicitly ask for enrichment)
-pub fn run_enrich(conn: &Connection, force: bool, quiet: bool) {
+/// - `no_itunes` — if true, skip the iTunes cover lookup and go straight to CAA
+pub fn run_enrich(conn: &Connection, force: bool, quiet: bool, no_itunes: bool) {
     if force {
         conn.execute("DELETE FROM album_cache", [])
             .expect("Failed to clear album_cache");
         eprintln!("Cleared album cache (force mode).");
     }
     let albums = db::uncached_albums(conn).expect("Failed to query uncached albums");
-    run_enrich_albums(conn, albums, quiet);
+    run_enrich_albums(conn, albums, quiet, no_itunes);
 }
 
 /// Inner enrichment loop shared by `run_enrich` and `run_enrich_targeted`.
-fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: bool) {
+fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: bool, no_itunes: bool) {
     if albums.is_empty() {
         if !quiet {
             eprintln!("All albums are already cached. Nothing to do.");
@@ -948,24 +954,33 @@ fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: b
         );
 
         // Step 1: Search MusicBrainz for matching releases.
+        // Always done — we need the MBID for genre data and as the CAA
+        // lookup key, even if we end up getting the cover from iTunes.
         thread::sleep(RATE_LIMIT_DELAY);
         let candidates = search_releases(&client, &album.artist, &album.album);
 
         if candidates.is_empty() {
-            eprintln!("  No match found on MusicBrainz. Trying iTunes...");
+            eprintln!("  No match found on MusicBrainz.");
 
-            // Fall back to iTunes for cover art even without an MBID.
-            let cover = fetch_itunes_cover_url(&client, &album.artist, &album.album)
-                .and_then(|art_url| {
-                    let stem = itunes_cover_stem(&album.artist, &album.album);
-                    let dest = covers.join(format!("{}.jpg", stem));
-                    try_download(&client, &art_url, &dest)
-                });
+            // Without an MBID we can't query CAA, so iTunes is the only
+            // cover option. Use a hash-based filename since there's no MBID.
+            let cover = if no_itunes {
+                eprintln!("  iTunes disabled, no cover available.");
+                None
+            } else {
+                eprintln!("  Trying iTunes...");
+                fetch_itunes_cover_url(&client, &album.artist, &album.album)
+                    .and_then(|art_url| {
+                        let stem = itunes_cover_stem(&album.artist, &album.album);
+                        let dest = covers.join(format!("{}.jpg", stem));
+                        try_download(&client, &art_url, &dest)
+                    })
+            };
 
             if cover.is_some() {
                 eprintln!("  Cover downloaded (from iTunes).");
                 cover_count += 1;
-            } else {
+            } else if !no_itunes {
                 eprintln!("  No cover art available from any source.");
             }
 
@@ -996,45 +1011,57 @@ fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: b
             eprintln!("  Genres: {}", g);
         }
 
-        // Step 3: Try to download cover art with fallback strategies.
-        thread::sleep(RATE_LIMIT_DELAY);
-        let mut cover = download_cover_with_fallback(
-            &client,
-            primary_mbid,
-            release_group_id.as_deref(),
-            &covers,
-        );
-
-        // Step 4: If still no cover, try other candidate releases.
-        if cover.is_none() && candidates.len() > 1 {
-            eprintln!(
-                "  No cover from primary release, trying {} other candidate(s)...",
-                candidates.len() - 1
-            );
-            for alt_mbid in &candidates[1..] {
-                thread::sleep(RATE_LIMIT_DELAY);
-                let alt_url = format!("https://coverartarchive.org/release/{}/front", alt_mbid);
-                let dest = covers.join(format!("{}.jpg", primary_mbid));
-                if let Some(path) = try_download(&client, &alt_url, &dest) {
-                    eprintln!("  Cover downloaded (from alternate release {}).", alt_mbid);
-                    cover = Some(path);
-                    break;
-                }
-            }
-        }
-
-        // Step 5: If still no cover, try iTunes as a last resort.
-        if cover.is_none() {
-            eprintln!("  No cover from CAA. Trying iTunes...");
-            cover = fetch_itunes_cover_url(&client, &album.artist, &album.album)
+        // Step 3: Try iTunes first — it's fast, has no rate limit, and has
+        // good commercial coverage. Reuse the MBID-based filename so the file
+        // is still associated with the correct release regardless of source.
+        let mut cover = if no_itunes {
+            None
+        } else {
+            let itunes_cover = fetch_itunes_cover_url(&client, &album.artist, &album.album)
                 .and_then(|art_url| {
-                    // Reuse the MBID-based filename so the file is still
-                    // associated with the release even though it came from iTunes.
                     let dest = covers.join(format!("{}.jpg", primary_mbid));
                     try_download(&client, &art_url, &dest)
                 });
-            if cover.is_some() {
+            if itunes_cover.is_some() {
                 eprintln!("  Cover downloaded (from iTunes).");
+            }
+            itunes_cover
+        };
+
+        // Step 4: If iTunes had no cover, fall back to the Cover Art Archive.
+        // CAA is better for obscure or non-commercial releases, and has the
+        // highest possible resolution for releases it does have.
+        if cover.is_none() {
+            if !no_itunes {
+                eprintln!("  No iTunes cover. Trying Cover Art Archive...");
+            }
+
+            // Try the primary release and its release-group first.
+            thread::sleep(RATE_LIMIT_DELAY);
+            cover = download_cover_with_fallback(
+                &client,
+                primary_mbid,
+                release_group_id.as_deref(),
+                &covers,
+            );
+
+            // If still nothing, try alternate candidate releases from the search.
+            if cover.is_none() && candidates.len() > 1 {
+                eprintln!(
+                    "  No cover from primary release, trying {} other candidate(s)...",
+                    candidates.len() - 1
+                );
+                for alt_mbid in &candidates[1..] {
+                    thread::sleep(RATE_LIMIT_DELAY);
+                    let alt_url =
+                        format!("https://coverartarchive.org/release/{}/front", alt_mbid);
+                    let dest = covers.join(format!("{}.jpg", primary_mbid));
+                    if let Some(path) = try_download(&client, &alt_url, &dest) {
+                        eprintln!("  Cover downloaded (from alternate release {}).", alt_mbid);
+                        cover = Some(path);
+                        break;
+                    }
+                }
             }
         }
 
