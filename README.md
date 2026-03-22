@@ -1,29 +1,31 @@
 # scrbblr
 
-A local music scrobbler for MPRIS-compatible players, built in Rust. It tracks what you listen to via `playerctl`, stores scrobble data in a local SQLite database, and generates listening reports.
+A local music scrobbler for MPRIS-compatible players and MPD, built in Rust. It tracks what you listen to, stores scrobble data in a local SQLite database, and generates listening reports.
 
 ## Features
 
+- **Dual source scrobbling** — tracks both MPRIS players (via `playerctl`) and MPD simultaneously; each maintains its own tracker writing to the same database
 - **Accurate play time tracking** — monitors both metadata changes and play/pause status, so paused time doesn't count toward scrobble thresholds
 - **Last.fm-style scrobble rules** — a track is scrobbled after 50% of its duration or 4 minutes of play, whichever is shorter
 - **Local storage** — all data stays on your machine in a single SQLite file
 - **Reports** — terminal tables or JSON output, filterable by time period (today, week, month, year, all time)
 - **Adaptive terminal tables** — report columns shrink to fit narrower terminal widths
-- **HTML reports** — generate a standalone dark-themed HTML file with album art cards
-- **Terminal-style typography** — HTML uses JetBrains Mono with monospace fallbacks
+- **HTML reports** — generate a standalone dark-themed HTML file with album art cards, bar charts, and genre pills
+- **Source colour-coding** — album cards and bar table rows are tinted by dominant scrobble source (MPRIS vs MPD), with a consistent per-source colour palette
 - **Fair ranking tie-breaks** — top artists/albums/tracks are ranked by plays first, then total listen time
-- **Album visuals + bars** — HTML shows both large album cover grids and top-album bar tables
-- **Genre stats** — reports include top genres (plays + listen time) when metadata is available
-- **Mood labels by period** — each report section highlights up to 6 dominant genres
-- **Mobile jump menu** — sticky section links (Today/Week/Month/All Time) reduce scrolling on phones
-- **Enrichment** — fetch album covers + genres from MusicBrainz/Cover Art Archive
+- **Genre stats** — reports include top genres and per-period "Mood" labels; single-word broad genres (e.g. "ambient", "electronic") are deprioritised below multi-word ones
+- **Mobile-optimised report** — responsive layout with a sticky jump nav; bar graphs drop on small screens leaving just rank + duration
+- **Terminal-style typography** — HTML uses JetBrains Mono with monospace fallbacks
+- **Enrichment** — extract embedded covers from MPD music files (offline), and/or fetch album art + genres from MusicBrainz / iTunes / Cover Art Archive
+- **Targeted enrichment** — `report --html` fetches covers only for the albums that actually appear in the report, not the entire library
 - **Incremental publish helper** — query latest scrobble and publish only when new data exists
-- **Configurable player** — defaults to `com.blitzfc.qbz`, configurable via `--player`
+- **Configurable player** — MPRIS player defaults to `com.blitzfc.qbz`, configurable via `--player`
 
 ## Requirements
 
-- [playerctl](https://github.com/altdesktop/playerctl)
 - Rust toolchain (for building)
+- [playerctl](https://github.com/altdesktop/playerctl) — required only for MPRIS scrobbling; omit with `--no-mpris` if you use MPD only
+- MPD — required only for MPD scrobbling; omit with `--no-mpd` if you use MPRIS only
 
 ## Installation
 
@@ -76,7 +78,7 @@ mkdir -p ~/.config/systemd/user
 cp contrib/systemd/user/scrbblr.service ~/.config/systemd/user/
 ```
 
-If needed, edit the player in the service (`--player com.blitzfc.qbz`).
+If needed, edit the player in the service (`--player com.blitzfc.qbz`) or add `--no-mpris` / `--no-mpd`.
 
 ### 2) Enable and start
 
@@ -102,7 +104,7 @@ loginctl enable-linger "$USER"
 
 ### Important session note
 
-`playerctl` and MPRIS are tied to the session D-Bus. The scrobbler must run in the **same user/session** as your player. If the player runs under another account/session, this service will not see it.
+`playerctl` and MPRIS are tied to the session D-Bus. The scrobbler must run in the **same user/session** as your player. If the player runs under another account/session, this service will not see it. MPD does not have this restriction — it connects over TCP or Unix socket.
 
 ## Report workflow
 
@@ -121,12 +123,11 @@ This creates a self-contained directory:
 ~/music-report/
 ├── index.html       # Open this in a browser
 └── covers/
-    ├── <mbid1>.jpg
-    ├── <mbid2>.jpg
+    ├── <uuid>.jpg
     └── ...
 ```
 
-When `--html` is used, the tool automatically runs enrichment first (for missing albums) so covers/genres are available in the generated report.
+When `--html` is used, enrichment runs automatically before rendering — first extracting embedded covers from MPD for any albums that appear in the report, then fetching missing covers/genres online. Use `--no-enrich` to skip this step.
 
 ## Building
 
@@ -140,21 +141,34 @@ The binary will be at `target/release/scrbblr`.
 
 ### Scrobbling
 
-Start the watcher to begin recording what you listen to:
+Start the watcher to begin recording what you listen to. By default, both the MPRIS watcher (via `playerctl`) and the MPD watcher run simultaneously:
 
 ```bash
-# Default player (com.blitzfc.qbz)
+# Both MPRIS and MPD (default)
 scrbblr watch
 
-# Specify a different player
+# MPRIS only (disable MPD watcher)
+scrbblr watch --no-mpd
+
+# MPD only (disable MPRIS watcher)
+scrbblr watch --no-mpris
+
+# Specify a different MPRIS player
 scrbblr watch --player spotify
+
+# Connect to MPD on a non-default host or port
+scrbblr watch --mpd-host 192.168.1.10 --mpd-port 6600
+
+# MPD via Unix socket
+scrbblr watch --mpd-host /run/mpd/socket
 ```
 
 The watcher runs in the foreground and logs scrobbles to stderr:
 
 ```
 Database: /home/user/.local/share/scrbblr/scrobbles.db
-Watching player: com.blitzfc.qbz
+Watching MPRIS player: com.blitzfc.qbz
+Watching MPD
 [scrobbled] ††† (Crosses) - This Is a Trick (186s)
 [scrobbled] ††† (Crosses) - Telepathy (200s)
 ```
@@ -196,8 +210,14 @@ scrbblr report --html
 # HTML output to directory (with covers)
 scrbblr report --html --output ~/music-report
 
-# Change the number of entries in top-N lists (default: 20)
+# Change the number of entries in top-N lists (default: 10)
 scrbblr report --limit 20
+
+# Skip automatic enrichment (faster, but covers/genres may be missing)
+scrbblr report --html --output ~/music-report --no-enrich
+
+# Use a non-default MPD host for cover extraction
+scrbblr report --html --output ~/music-report --mpd-host /run/mpd/socket
 ```
 
 Example terminal output:
@@ -228,7 +248,11 @@ Top Artists
 
 ```
 scrbblr watch [OPTIONS]
-    --player <NAME>      Player name for playerctl [default: com.blitzfc.qbz]
+    --player <NAME>      MPRIS player name for playerctl [default: com.blitzfc.qbz]
+    --no-mpris           Disable the MPRIS/playerctl watcher
+    --no-mpd             Disable the MPD watcher
+    --mpd-host <HOST>    MPD hostname, IP, or Unix socket path [default: localhost]
+    --mpd-port <PORT>    MPD TCP port [default: 6600]
     --db-path <PATH>     Path to the SQLite database
 
 scrbblr report [OPTIONS]
@@ -236,30 +260,61 @@ scrbblr report [OPTIONS]
     --json               Output as JSON
     --html               Output as standalone HTML
     --output <PATH>      Write HTML report to this directory (index.html + covers/)
-    --limit <LIMIT>      Number of entries in top-N lists [default: 10]
+    --limit <N>          Number of entries in top-N lists [default: 10]
     --all-time-limit <N> Override all-time top-N limit [default: 2.5x --limit]
+    --no-enrich          Skip automatic cover/genre enrichment before rendering
+    --mpd-host <HOST>    MPD host for cover extraction [default: localhost]
+    --mpd-port <PORT>    MPD port for cover extraction [default: 6600]
     --db-path <PATH>     Path to the SQLite database
 
 scrbblr enrich [OPTIONS]
-    --force              Re-fetch metadata for all albums
+    --online             Fetch metadata and covers from MusicBrainz / iTunes / CAA
+    --force              Re-fetch all albums from MusicBrainz (implies --online)
+    --retry-covers       Reset the 7-day cooldown for albums missing covers
+    --no-itunes          Skip iTunes; fall back directly to Cover Art Archive
+    --no-mpd-covers      Skip MPD embedded cover extraction
+    --mpd-host <HOST>    MPD host for cover extraction [default: localhost]
+    --mpd-port <PORT>    MPD port for cover extraction [default: 6600]
     --db-path <PATH>     Path to the SQLite database
 
 scrbblr last-scrobble [OPTIONS]
+    --db-path <PATH>     Path to the SQLite database
+
+scrbblr pin-album [OPTIONS]
+    --artist <ARTIST>    Artist name as stored in the database
+    --album <ALBUM>      Album name as stored in the database
+    --mbid <UUID>        MusicBrainz release UUID
+    --cover-url <URL>    Direct URL to a cover image (when CAA has none)
     --db-path <PATH>     Path to the SQLite database
 ```
 
 ### Enrichment (covers + genres)
 
-Enrichment is automatic for `report --html`, but you can still run it manually if you want to prefetch metadata:
+Enrichment runs in two stages:
+
+**Stage 1 — MPD embedded covers (offline, no network)**
+
+By default, `enrich` connects to MPD and extracts embedded cover art from your music files using MPD's `readpicture` command. This is fast, works entirely offline, and only processes albums scrobbled via MPD that don't yet have a cover:
 
 ```bash
 scrbblr enrich
 ```
 
-When MusicBrainz matching is tricky, enrichment now retries with normalised
-album variants (e.g. strips parenthetical suffixes like `(Killing Eve)`, then
-progressively shortens trailing words), tries artist aliases for symbol-heavy
-names, and falls back to recording search before giving up.
+**Stage 2 — Online lookup (MusicBrainz + iTunes + Cover Art Archive)**
+
+Pass `--online` to also query MusicBrainz for album metadata (MBID, genres) and download covers for albums that still have none after the MPD pass:
+
+```bash
+scrbblr enrich --online
+```
+
+Cover art is sourced from **iTunes first** (fast, no rate limiting), then the **Cover Art Archive** as fallback. Pass `--no-itunes` to skip iTunes and use only CAA:
+
+```bash
+scrbblr enrich --online --no-itunes
+```
+
+When MusicBrainz matching is tricky, enrichment retries with normalised album variants (strips parenthetical suffixes, progressively shortens trailing words), tries artist aliases for symbol-heavy names, and falls back to recording search before giving up.
 
 Genre extraction order:
 
@@ -268,24 +323,26 @@ Genre extraction order:
 3. Release-group `genres`
 4. Release-group `tags`
 
-Automatic enrichment (triggered by `report --html`) uses a retry cooldown for
-incomplete cache entries (missing cover or missing genre): those entries are
-re-tried after 7 days, not on every report run.
-
-Use force mode when you want immediate backfill/refresh for everything:
+Automatic enrichment (triggered by `report --html`) uses a 7-day retry cooldown for incomplete cache entries (missing cover or genre) so it doesn't hammer MusicBrainz on every report run. Use `--retry-covers` to reset that cooldown and retry albums missing covers immediately:
 
 ```bash
-scrbblr enrich --force
+scrbblr enrich --online --retry-covers
+```
+
+Use `--force` to re-fetch all albums from scratch (ignores the cooldown entirely):
+
+```bash
+scrbblr enrich --online --force
 ```
 
 Genre normalisation notes:
 
-- Genre labels are currently passed through from MusicBrainz with light cleanup only.
+- Genre labels are passed through from MusicBrainz with light cleanup only.
 - We split comma-separated values and trim spaces.
 - For aggregation, hyphen/space variants are grouped (e.g. `post-rock` + `post rock`).
 - When both forms exist, the spaced form is preferred for display.
-- Album cards display at most 3 genre pills for readability.
-- Top Genre and Mood sections aggregate using that normalised grouping.
+- Album cards display at most 3 genre pills, preferring multi-word genres over single-word ones.
+- Top Genre and Mood sections aggregate using the same normalised grouping and the same deprioritisation rule.
 
 Downloaded covers are stored in:
 
@@ -341,7 +398,7 @@ Bandcamp, etc.
 If you publish the report to a remote host, use the included helper script:
 
 ```bash
-./scrbblr-publish.sh
+./scrbblr-publish.sh --help
 ```
 
 It runs `report --html` and `rsync` only when a newer scrobble exists.
@@ -399,18 +456,27 @@ Each scrobble records:
 | artist | Artist name |
 | album | Album name |
 | title | Track title |
+| source | Scrobble source (`MPRIS` or `MPD`) |
 | track_duration_secs | Full track duration in seconds |
 | played_duration_secs | Actual time spent listening |
 | scrobbled_at | ISO 8601 timestamp |
 
 ## How it works
 
-The watcher spawns two `playerctl --follow` processes:
+### MPRIS watcher
+
+The `watch` command spawns two `playerctl --follow` child processes:
 
 1. **Metadata follower** — emits a line each time the track changes
 2. **Status follower** — emits `Playing`, `Paused`, or `Stopped` on state changes
 
-A state machine accumulates play time only while the player is in `Playing` state. When a new track starts (or the player stops), the previous track is evaluated against the scrobble threshold and recorded if it qualifies.
+Each process gets its own reader thread that sends typed events over an `mpsc` channel to the main thread. The main thread owns a `ScrobbleTracker` state machine, which processes events sequentially and decides when to write scrobbles to the database.
+
+### MPD watcher
+
+Unless `--no-mpd` is passed, a separate thread connects to MPD using the idle protocol and runs its own `ScrobbleTracker`. It writes to the same database independently — no synchronisation is needed between the two watchers. The MPD watcher connects over TCP (default: `localhost:6600`) or a Unix socket if a socket path is given as `--mpd-host`.
+
+Both watchers observe a shared shutdown flag. Ctrl+C sets it to false; the MPRIS main loop also receives an `Eof` event through its channel. The MPD watcher notices the flag on its next idle timeout (≤ 500 ms).
 
 ## Troubleshooting
 
@@ -431,7 +497,7 @@ systemctl --user restart scrbblr.service
 
 ### Player is in another account/session
 
-MPRIS is session-scoped. The service must run in the same account/session as the player process.
+MPRIS is session-scoped. The service must run in the same account/session as the player process. MPD does not have this restriction.
 
 ### Check logs
 
