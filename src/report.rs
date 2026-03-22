@@ -1320,11 +1320,11 @@ tr:last-child td { border-bottom: none; }
 ///
 /// Format: (background tint, border accent)
 const SOURCE_PALETTE: &[(&str, &str)] = &[
-    ("rgba(240,192,106,0.10)", "rgba(240,192,106,0.30)"), // amber  (warm)
-    ("rgba(100,160,240,0.10)", "rgba(100,160,240,0.30)"), // blue   (cool)
-    ("rgba(140,210,130,0.10)", "rgba(140,210,130,0.30)"), // green
-    ("rgba(200,130,220,0.10)", "rgba(200,130,220,0.30)"), // purple
-    ("rgba(220,130,130,0.10)", "rgba(220,130,130,0.30)"), // red
+    ("rgba(240,192,106,0.22)", "rgba(240,192,106,0.60)"), // amber  (warm)
+    ("rgba(100,160,240,0.22)", "rgba(100,160,240,0.60)"), // blue   (cool)
+    ("rgba(140,210,130,0.22)", "rgba(140,210,130,0.60)"), // green
+    ("rgba(200,130,220,0.22)", "rgba(200,130,220,0.60)"), // purple
+    ("rgba(220,130,130,0.22)", "rgba(220,130,130,0.60)"), // red
 ];
 
 /// Look up the card background and border colours for a source name, given
