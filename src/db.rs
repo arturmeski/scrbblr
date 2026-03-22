@@ -594,8 +594,8 @@ pub fn top_genres(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
         // Deprioritised genres (e.g. "ambient") always rank below specific
         // genres regardless of play count. They still appear in the list if
         // they are the only genres present.
-        let a_dep = is_deprioritised(&a.genre);
-        let b_dep = is_deprioritised(&b.genre);
+        let a_dep = is_deprioritised_genre(&a.genre);
+        let b_dep = is_deprioritised_genre(&b.genre);
         match (a_dep, b_dep) {
             (true, false) => std::cmp::Ordering::Greater,
             (false, true) => std::cmp::Ordering::Less,
@@ -743,7 +743,7 @@ pub fn uncached_albums(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
 /// Single-word genres ("rock", "electronic", "ambient") are broad descriptors
 /// that appear as secondary tags on many artists. Multi-word genres ("prog
 /// rock", "alternative metal") are more specific and should rank first.
-fn is_deprioritised(genre: &str) -> bool {
+pub fn is_deprioritised_genre(genre: &str) -> bool {
     canonical_genre_key(genre).split_whitespace().count() < 2
 }
 

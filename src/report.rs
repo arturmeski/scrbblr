@@ -1539,16 +1539,23 @@ fn html_attr_escape(s: &str) -> String {
     html_escape(s).replace('"', "&quot;")
 }
 
-/// Split a comma-separated genre list and keep only the first `max_labels`
-/// cleaned labels.
+/// Split a comma-separated genre list and return the top `max_labels` labels,
+/// applying the same deprioritisation rule as `top_genres`: multi-word genres
+/// rank before single-word broad descriptors ("rock", "electronic", etc.).
 fn top_genre_labels(genre_csv: &str, max_labels: usize) -> Vec<String> {
-    genre_csv
+    let mut labels: Vec<String> = genre_csv
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .take(max_labels)
         .map(|s| s.to_string())
-        .collect()
+        .collect();
+
+    // Stable sort so that multi-word genres always precede single-word ones,
+    // preserving the original MusicBrainz order within each group.
+    labels.sort_by_key(|g| db::is_deprioritised_genre(g));
+
+    labels.truncate(max_labels);
+    labels
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,6 +1617,9 @@ mod tests {
 
     #[test]
     fn test_top_genre_labels_caps_to_three() {
+        // "alternative rock" and "industrial" are multi-word → rank first.
+        // "electronic" and "darkwave" are single-word → deprioritised.
+        // With limit 3 we get both multi-word genres + one single-word.
         let labels = top_genre_labels("alternative rock, electronic, industrial, darkwave", 3);
         assert_eq!(
             labels,
