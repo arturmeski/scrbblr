@@ -1544,8 +1544,15 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
     if has_covers {
         h.line("<th></th>"); // empty header for the cover column
     }
-    for hdr in headers {
-        h.linef(format_args!("<th>{}</th>", html_escape(hdr)));
+    // The second-to-last header is always the play-count column; mark it so
+    // it can be hidden together with the td.play-count cells on mobile.
+    let play_count_idx = headers.len().saturating_sub(2);
+    for (i, hdr) in headers.iter().enumerate() {
+        if i == play_count_idx {
+            h.linef(format_args!("<th class=\"play-count\">{}</th>", html_escape(hdr)));
+        } else {
+            h.linef(format_args!("<th>{}</th>", html_escape(hdr)));
+        }
     }
     h.close("</tr>");
     h.close("</thead>");
