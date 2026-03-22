@@ -1062,12 +1062,33 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .flatten()
                     .and_then(|m| m.cover_url);
                 let cover = resolve_cover(cover_url, &mut cover_files);
+                // Prepend a subtle source dot to the album name if we know
+                // the dominant source for this album.
+                let album_cell = if let Some(src) = a.dominant_source.as_deref() {
+                    if let Some((bg, _)) = source_colours(src, &ordered_sources) {
+                        format!(
+                            "<span style=\"display:inline-block;width:9px;height:9px;\
+                             border-radius:50%;background:{};margin-right:5px;\
+                             vertical-align:middle\"></span>{}",
+                            bg,
+                            html_escape(&a.album)
+                        )
+                    } else {
+                        html_escape(&a.album)
+                    }
+                } else {
+                    html_escape(&a.album)
+                };
                 BarRow {
-                    cells: vec![(i + 1).to_string(), a.artist.clone(), a.album.clone()],
+                    cells: vec![
+                        (i + 1).to_string(),
+                        html_escape(&a.artist),
+                        album_cell,
+                    ],
                     value: a.plays,
                     suffix: format_duration(a.listen_time_secs),
                     cover,
-                    raw_cells: false,
+                    raw_cells: true,
                 }
             })
             .collect();
@@ -1138,12 +1159,27 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .flatten()
                     .and_then(|m| m.cover_url);
                 let cover = resolve_cover(cover_url, &mut cover_files);
+                let title_cell = if let Some(src) = t.dominant_source.as_deref() {
+                    if let Some((bg, _)) = source_colours(src, &ordered_sources) {
+                        format!(
+                            "<span style=\"display:inline-block;width:9px;height:9px;\
+                             border-radius:50%;background:{};margin-right:5px;\
+                             vertical-align:middle\"></span>{}",
+                            bg,
+                            html_escape(&t.title)
+                        )
+                    } else {
+                        html_escape(&t.title)
+                    }
+                } else {
+                    html_escape(&t.title)
+                };
                 BarRow {
-                    cells: vec![(i + 1).to_string(), t.artist.clone(), t.title.clone()],
+                    cells: vec![(i + 1).to_string(), html_escape(&t.artist), title_cell],
                     value: t.plays,
                     suffix: format_duration(t.listen_time_secs),
                     cover,
-                    raw_cells: false,
+                    raw_cells: true,
                 }
             })
             .collect();

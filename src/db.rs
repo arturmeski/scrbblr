@@ -111,6 +111,7 @@ pub struct TopTrack {
     pub title: String,
     pub plays: i64,
     pub listen_time_secs: i64,
+    pub dominant_source: Option<String>,
 }
 
 /// A row in the "top genres" ranking.
@@ -521,13 +522,28 @@ pub fn top_tracks(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
     // In SQLite, the non-aggregated `album` column in a GROUP BY returns an
     // arbitrary row's value, but wrapping it in a subquery with its own
     // GROUP BY and ORDER BY ensures we get the most frequent album.
+    let subquery_period_filter = if whr.is_empty() {
+        String::new()
+    } else {
+        " AND s2.scrobbled_at BETWEEN ?1 AND ?2".to_string()
+    };
+
     let sql = format!(
-        "SELECT artist, album, title, COUNT(*) as plays, COALESCE(SUM(played_duration_secs), 0) as listen_time
+        "SELECT artist, album, title, COUNT(*) as plays,
+                COALESCE(SUM(played_duration_secs), 0) as listen_time,
+                (SELECT s2.source
+                 FROM scrobbles s2
+                 WHERE s2.artist = scrobbles.artist
+                   AND s2.title = scrobbles.title
+                   AND s2.source IS NOT NULL{}
+                 GROUP BY s2.source
+                 ORDER BY COUNT(*) DESC
+                 LIMIT 1) AS dominant_source
          FROM scrobbles{}
          GROUP BY artist, title
          ORDER BY plays DESC, listen_time DESC, artist ASC, title ASC
          LIMIT {}",
-        whr, limit
+        subquery_period_filter, whr, limit
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -538,6 +554,7 @@ pub fn top_tracks(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
             title: row.get(2)?,
             plays: row.get(3)?,
             listen_time_secs: row.get(4)?,
+            dominant_source: row.get(5)?,
         })
     };
     if p.is_empty() {
