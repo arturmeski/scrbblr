@@ -591,10 +591,20 @@ pub fn top_genres(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
         })
         .collect();
     out.sort_by(|a, b| {
-        b.plays
-            .cmp(&a.plays)
-            .then_with(|| b.listen_time_secs.cmp(&a.listen_time_secs))
-            .then_with(|| a.genre.cmp(&b.genre))
+        // Deprioritised genres (e.g. "ambient") always rank below specific
+        // genres regardless of play count. They still appear in the list if
+        // they are the only genres present.
+        let a_dep = is_deprioritised(&a.genre);
+        let b_dep = is_deprioritised(&b.genre);
+        match (a_dep, b_dep) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => b
+                .plays
+                .cmp(&a.plays)
+                .then_with(|| b.listen_time_secs.cmp(&a.listen_time_secs))
+                .then_with(|| a.genre.cmp(&b.genre)),
+        }
     });
     out.truncate(limit.max(0) as usize);
     Ok(out)
@@ -726,6 +736,15 @@ pub fn uncached_albums(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
         })
     })?;
     rows.collect()
+}
+
+/// Returns true if `genre` should rank below more specific genres.
+///
+/// Single-word genres ("rock", "electronic", "ambient") are broad descriptors
+/// that appear as secondary tags on many artists. Multi-word genres ("prog
+/// rock", "alternative metal") are more specific and should rank first.
+fn is_deprioritised(genre: &str) -> bool {
+    canonical_genre_key(genre).split_whitespace().count() < 2
 }
 
 /// Split a comma-separated genre string into cleaned labels.
@@ -1148,12 +1167,15 @@ mod tests {
         .unwrap();
 
         let genres = top_genres(&conn, "all", 10).unwrap();
-        assert_eq!(genres[0].genre, "darkwave");
-        assert_eq!(genres[0].plays, 3);
-        assert_eq!(genres[1].genre, "electronic");
+        // Multi-word genres rank first regardless of play count.
+        // Single-word genres ("darkwave", "electronic") are deprioritised.
+        assert_eq!(genres[0].genre, "alternative metal");
+        assert_eq!(genres[0].plays, 2);
+        // Single-word genres follow, ordered by plays then listen time.
+        assert_eq!(genres[1].genre, "darkwave");
         assert_eq!(genres[1].plays, 3);
-        assert_eq!(genres[2].genre, "alternative metal");
-        assert_eq!(genres[2].plays, 2);
+        assert_eq!(genres[2].genre, "electronic");
+        assert_eq!(genres[2].plays, 3);
     }
 
     #[test]
