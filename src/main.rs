@@ -405,7 +405,8 @@ fn run_watch(player: &str, use_mpris: bool, mpd_config: Option<mpd::MpdConfig>, 
     // Receives events from both reader threads and the Ctrl+C handler,
     // and feeds them into the MPRIS ScrobbleTracker state machine.
     // When MPRIS is disabled, this loop exits immediately on shutdown.
-    let mut tracker = watcher::create_db_tracker(conn);
+    let source = watcher::normalise_player_name(player);
+    let mut tracker = watcher::create_db_tracker(conn, source);
     let mut eof_count = 0;
     let mut flushed = false;
 

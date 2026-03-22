@@ -603,7 +603,7 @@ pub fn run_mpd_watch(config: &MpdConfig, conn: Arc<Mutex<Connection>>, running: 
     // Keep a clone of `conn` for inline cover extraction. The tracker closure
     // owns the original; both share the same underlying Mutex<Connection>.
     let conn_for_covers = conn.clone();
-    let mut tracker = watcher::create_db_tracker(conn);
+    let mut tracker = watcher::create_db_tracker(conn, "MPD".to_string());
 
     // Outer loop: reconnect on failure until shutdown is requested.
     while running.load(Ordering::SeqCst) {

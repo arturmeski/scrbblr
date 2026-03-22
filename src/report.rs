@@ -210,6 +210,8 @@ pub struct ReportData {
     pub top_tracks: Vec<db::TopTrack>,
     /// Top genres derived from cached album metadata.
     pub top_genres: Vec<db::TopGenre>,
+    /// Breakdown of scrobbles by source (player/service).
+    pub top_sources: Vec<db::TopSource>,
     /// Most recent scrobbles (newest first), limited to 20.
     pub recent_scrobbles: Vec<db::Scrobble>,
 }
@@ -529,6 +531,7 @@ pub fn gather_report(
         top_albums: db::top_albums(conn, period, limit)?,
         top_tracks: db::top_tracks(conn, period, limit)?,
         top_genres: db::top_genres(conn, period, limit)?,
+        top_sources: db::top_sources(conn, period)?,
         // Recent scrobbles are always limited to 20, regardless of the --limit flag.
         recent_scrobbles: db::recent_scrobbles(conn, period, 20)?,
     })
@@ -582,6 +585,28 @@ pub fn print_terminal_report(data: &ReportData) {
     let mood = mood_labels(&data.top_genres, 6);
     if !mood.is_empty() && data.period.name != "all" {
         println!("  Mood: {}", mood.join(" · "));
+    }
+
+    // --- Source Breakdown ---
+    if !data.top_sources.is_empty() {
+        println!("\n  Sources");
+        let rows: Vec<Vec<String>> = data
+            .top_sources
+            .iter()
+            .map(|s| {
+                vec![
+                    s.source.clone(),
+                    s.scrobbles.to_string(),
+                    format_duration(s.listen_time_secs),
+                ]
+            })
+            .collect();
+        print_box_table(
+            &["Source", "Scrobbles", "Time"],
+            &rows,
+            None,
+            &[0],
+        );
     }
 
     // --- Top Artists ---
@@ -880,6 +905,30 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
         write_kpi(&mut h, "Albums", &data.overview.unique_albums.to_string());
         write_kpi(&mut h, "Tracks", &data.overview.unique_tracks.to_string());
         h.close("</div>");
+
+        // Source breakdown — simple bar table showing scrobbles per player/service.
+        // Only rendered when there is more than one source, or when the single
+        // source differs from the default expectation, so it doesn't clutter
+        // reports for users with a single player.
+        if !data.top_sources.is_empty() {
+            let source_rows: Vec<BarRow> = data
+                .top_sources
+                .iter()
+                .enumerate()
+                .map(|(i, s)| BarRow {
+                    cells: vec![(i + 1).to_string(), s.source.clone()],
+                    value: s.scrobbles,
+                    suffix: format_duration(s.listen_time_secs),
+                    cover: None,
+                })
+                .collect();
+            write_bar_table(
+                &mut h,
+                "Sources",
+                &["#", "Source", "Scrobbles", ""],
+                &source_rows,
+            );
+        }
 
         // Album cover grid — shown first after KPIs to visually illustrate
         // the period's listening at a glance.
@@ -1633,6 +1682,7 @@ mod tests {
                 track_duration_secs: Some(186),
                 played_duration_secs: 186,
                 scrobbled_at: "2026-03-19T10:00:00".into(),
+                source: "test".into(),
             },
             db::NewScrobble {
                 artist: "††† (Crosses)".into(),
@@ -1641,6 +1691,7 @@ mod tests {
                 track_duration_secs: Some(215),
                 played_duration_secs: 200,
                 scrobbled_at: "2026-03-19T10:05:00".into(),
+                source: "test".into(),
             },
             db::NewScrobble {
                 artist: "Deftones".into(),
@@ -1649,6 +1700,7 @@ mod tests {
                 track_duration_secs: Some(291),
                 played_duration_secs: 291,
                 scrobbled_at: "2026-03-19T10:10:00".into(),
+                source: "test".into(),
             },
         ];
         for s in &scrobbles {
@@ -1687,6 +1739,7 @@ mod tests {
                 track_duration_secs: Some(180),
                 played_duration_secs: 180,
                 scrobbled_at: "2026-03-19T10:00:00".into(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1709,6 +1762,7 @@ mod tests {
                 track_duration_secs: Some(180),
                 played_duration_secs: 170,
                 scrobbled_at: "2026-03-19T10:00:00".into(),
+                source: "test".into(),
             },
         )
         .unwrap();

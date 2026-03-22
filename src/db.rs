@@ -64,6 +64,8 @@ pub struct NewScrobble {
     pub track_duration_secs: Option<i64>,
     pub played_duration_secs: i64,
     pub scrobbled_at: String,
+    /// The source that produced this scrobble (e.g. "MPD", "Qobuz").
+    pub source: String,
 }
 
 /// Aggregate overview statistics for a given time period.
@@ -116,6 +118,15 @@ pub struct TopTrack {
 pub struct TopGenre {
     pub genre: String,
     pub plays: i64,
+    pub listen_time_secs: i64,
+}
+
+/// A row in the "top sources" breakdown, showing which player or source
+/// contributed most scrobbles (e.g. "MPD", "Qobuz").
+#[derive(Debug, Clone, Serialize)]
+pub struct TopSource {
+    pub source: String,
+    pub scrobbles: i64,
     pub listen_time_secs: i64,
 }
 
@@ -186,8 +197,15 @@ fn init_schema(conn: &Connection) -> Result<()> {
             scrobbled_at         TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_scrobbled_at ON scrobbles(scrobbled_at);
-        CREATE INDEX IF NOT EXISTS idx_artist ON scrobbles(artist);
-
+        CREATE INDEX IF NOT EXISTS idx_artist ON scrobbles(artist);",
+    )?;
+    // Add the source column to existing databases. SQLite returns an error if
+    // the column already exists, which we silently ignore for idempotency.
+    conn.execute(
+        "ALTER TABLE scrobbles ADD COLUMN source TEXT",
+        [],
+    ).ok();
+    conn.execute_batch("
         -- Cache table for album metadata (cover art, genres) from MusicBrainz.
         -- Populated by the 'enrich' command or automatically when generating
         -- HTML reports. Rows with cover_url = NULL are re-tried on next run.
@@ -212,8 +230,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
 /// Insert a new scrobble record and return its auto-generated row ID.
 pub fn insert_scrobble(conn: &Connection, s: &NewScrobble) -> Result<i64> {
     conn.execute(
-        "INSERT INTO scrobbles (artist, album, title, track_duration_secs, played_duration_secs, scrobbled_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO scrobbles (artist, album, title, track_duration_secs, played_duration_secs, scrobbled_at, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             s.artist,
             s.album,
@@ -221,6 +239,7 @@ pub fn insert_scrobble(conn: &Connection, s: &NewScrobble) -> Result<i64> {
             s.track_duration_secs,
             s.played_duration_secs,
             s.scrobbled_at,
+            s.source,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -581,6 +600,40 @@ pub fn top_genres(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
     Ok(out)
 }
 
+/// Get the top sources (players) by scrobble count for the given period,
+/// ordered by scrobble count descending. Rows with a NULL source are excluded
+/// — these are historical records written before the `source` column existed.
+pub fn top_sources(conn: &Connection, period: &str) -> Result<Vec<TopSource>> {
+    let (whr, p) = where_clause(period);
+    // Extend the WHERE clause to also filter out NULL sources.
+    let source_filter = if whr.is_empty() {
+        " WHERE source IS NOT NULL".to_string()
+    } else {
+        format!("{} AND source IS NOT NULL", whr)
+    };
+    let sql = format!(
+        "SELECT source, COUNT(*) as scrobbles, COALESCE(SUM(played_duration_secs), 0) as listen_time
+         FROM scrobbles{}
+         GROUP BY source
+         ORDER BY scrobbles DESC, listen_time DESC, source ASC",
+        source_filter
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mapper = |row: &rusqlite::Row| {
+        Ok(TopSource {
+            source: row.get(0)?,
+            scrobbles: row.get(1)?,
+            listen_time_secs: row.get(2)?,
+        })
+    };
+    if p.is_empty() {
+        stmt.query_map([], mapper)?.collect()
+    } else {
+        stmt.query_map(params![p[0], p[1]], mapper)?.collect()
+    }
+}
+
 /// Get the most recent scrobbles for the given period, ordered by
 /// timestamp descending (newest first), limited to `limit` entries.
 pub fn recent_scrobbles(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Scrobble>> {
@@ -919,6 +972,7 @@ mod tests {
                 track_duration_secs: Some(186),
                 played_duration_secs: 186,
                 scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                source: "test".into(),
             },
             NewScrobble {
                 artist: "††† (Crosses)".to_string(),
@@ -927,6 +981,7 @@ mod tests {
                 track_duration_secs: Some(215),
                 played_duration_secs: 200,
                 scrobbled_at: "2026-03-19T10:05:00".to_string(),
+                source: "test".into(),
             },
             NewScrobble {
                 artist: "Deftones".to_string(),
@@ -935,6 +990,7 @@ mod tests {
                 track_duration_secs: Some(291),
                 played_duration_secs: 291,
                 scrobbled_at: "2026-03-19T10:10:00".to_string(),
+                source: "test".into(),
             },
             NewScrobble {
                 artist: "Deftones".to_string(),
@@ -943,6 +999,7 @@ mod tests {
                 track_duration_secs: Some(290),
                 played_duration_secs: 250,
                 scrobbled_at: "2026-03-18T14:00:00".to_string(),
+                source: "test".into(),
             },
             NewScrobble {
                 artist: "††† (Crosses)".to_string(),
@@ -951,6 +1008,7 @@ mod tests {
                 track_duration_secs: Some(186),
                 played_duration_secs: 180,
                 scrobbled_at: "2026-03-12T09:00:00".to_string(),
+                source: "test".into(),
             },
         ];
         for s in &scrobbles {
@@ -976,6 +1034,7 @@ mod tests {
             track_duration_secs: Some(186),
             played_duration_secs: 186,
             scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                source: "test".into(),
         };
         // First insert should get row ID 1.
         let id = insert_scrobble(&conn, &s).unwrap();
@@ -1078,6 +1137,7 @@ mod tests {
                 track_duration_secs: Some(200),
                 played_duration_secs: 200,
                 scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1090,6 +1150,7 @@ mod tests {
                 track_duration_secs: Some(180),
                 played_duration_secs: 180,
                 scrobbled_at: "2026-03-19T10:01:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1143,6 +1204,7 @@ mod tests {
                 track_duration_secs: Some(120),
                 played_duration_secs: 120,
                 scrobbled_at: "2026-03-19T11:00:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1155,6 +1217,7 @@ mod tests {
                 track_duration_secs: Some(320),
                 played_duration_secs: 320,
                 scrobbled_at: "2026-03-19T11:05:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1181,6 +1244,7 @@ mod tests {
                 track_duration_secs: Some(150),
                 played_duration_secs: 150,
                 scrobbled_at: "2026-03-19T12:00:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1193,6 +1257,7 @@ mod tests {
                 track_duration_secs: Some(240),
                 played_duration_secs: 240,
                 scrobbled_at: "2026-03-19T12:05:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1229,6 +1294,7 @@ mod tests {
                     track_duration_secs: Some(300),
                     played_duration_secs: 300,
                     scrobbled_at: (*ts).to_string(),
+                    source: "test".into(),
                 },
             )
             .unwrap();
@@ -1281,6 +1347,7 @@ mod tests {
                 track_duration_secs: Some(100),
                 played_duration_secs: 100,
                 scrobbled_at: "2026-03-19T13:00:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1293,6 +1360,7 @@ mod tests {
                 track_duration_secs: Some(360),
                 played_duration_secs: 360,
                 scrobbled_at: "2026-03-19T13:05:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1338,6 +1406,7 @@ mod tests {
             track_duration_secs: None,
             played_duration_secs: 240,
             scrobbled_at: "2026-03-19T12:00:00".to_string(),
+                source: "test".into(),
         };
         insert_scrobble(&conn, &s).unwrap();
         let recent = recent_scrobbles(&conn, "all", 1).unwrap();
@@ -1359,6 +1428,7 @@ mod tests {
                 track_duration_secs: Some(100),
                 played_duration_secs: 100,
                 scrobbled_at: "2026-03-19T10:00:00".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1371,6 +1441,7 @@ mod tests {
                 track_duration_secs: Some(120),
                 played_duration_secs: 120,
                 scrobbled_at: "2026-03-19T12:34:56".to_string(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1404,6 +1475,7 @@ mod tests {
                     track_duration_secs: Some(180),
                     played_duration_secs: 180,
                     scrobbled_at: old_day.clone(),
+                    source: "test".into(),
                 },
             )
             .unwrap();
@@ -1419,6 +1491,7 @@ mod tests {
                 track_duration_secs: Some(200),
                 played_duration_secs: 200,
                 scrobbled_at: recent,
+                source: "test".into(),
             },
         )
         .unwrap();

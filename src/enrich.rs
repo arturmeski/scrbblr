@@ -1178,6 +1178,7 @@ mod tests {
                 track_duration_secs: Some(291),
                 played_duration_secs: 291,
                 scrobbled_at: "2026-03-19T10:00:00".into(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1190,6 +1191,7 @@ mod tests {
                 track_duration_secs: Some(215),
                 played_duration_secs: 200,
                 scrobbled_at: "2026-03-19T10:05:00".into(),
+                source: "test".into(),
             },
         )
         .unwrap();
@@ -1294,6 +1296,7 @@ mod tests {
                 track_duration_secs: Some(180),
                 played_duration_secs: 160,
                 scrobbled_at: "2026-03-19T10:00:00".into(),
+                source: "test".into(),
             },
         )
         .unwrap();

@@ -131,16 +131,19 @@ pub struct ScrobbleTracker<F: FnMut(NewScrobble)> {
     playing_since: Option<Instant>,
     accumulated_secs: f64,
     scrobble_fn: F,
+    /// The source label recorded alongside each scrobble (e.g. `"MPD"`).
+    source: String,
 }
 
 impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
-    pub fn new(scrobble_fn: F) -> Self {
+    pub fn new(scrobble_fn: F, source: String) -> Self {
         Self {
             current_track: None,
             is_playing: false,
             playing_since: None,
             accumulated_secs: 0.0,
             scrobble_fn,
+            source,
         }
     }
 
@@ -265,6 +268,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                     track_duration_secs: track_dur,
                     played_duration_secs: self.accumulated_secs.round() as i64,
                     scrobbled_at: now,
+                    source: self.source.clone(),
                 };
                 (self.scrobble_fn)(scrobble);
             }
@@ -330,6 +334,35 @@ pub fn parse_status_line(line: &str) -> Option<Event> {
 }
 
 // ---------------------------------------------------------------------------
+// Player name normalisation
+// ---------------------------------------------------------------------------
+
+/// Normalise a D-Bus player name (e.g. `"com.blitzfc.qbz"`) into a
+/// human-readable source label (e.g. `"Qobuz"`).
+///
+/// Logic:
+/// 1. Take the last `.`-separated segment of the D-Bus name.
+/// 2. Apply known mappings (matched case-insensitively):
+///    - `"qbz"` or `"qbz2"` → `"Qobuz"`
+/// 3. Otherwise: capitalise the first character of the segment.
+pub fn normalise_player_name(player: &str) -> String {
+    let segment = player.rsplit('.').next().unwrap_or(player);
+    match segment.to_lowercase().as_str() {
+        "qbz" | "qbz2" => "Qobuz".to_string(),
+        _ => {
+            let mut chars = segment.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let upper: String = first.to_uppercase().collect();
+                    upper + chars.as_str()
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Factory for production use
 // ---------------------------------------------------------------------------
 
@@ -339,23 +372,28 @@ pub fn parse_status_line(line: &str) -> Option<Event> {
 /// to stderr. The `Arc<Mutex<Connection>>` is shared with the main thread
 /// but only accessed from the main event loop (single-threaded), so contention
 /// is minimal.
+///
+/// The `source` parameter names the player or service that produced these
+/// scrobbles (e.g. `"MPD"`, `"Qobuz"`). It is stored alongside each scrobble
+/// and shown in source-breakdown reports.
 pub fn create_db_tracker(
     conn: std::sync::Arc<std::sync::Mutex<Connection>>,
+    source: String,
 ) -> ScrobbleTracker<impl FnMut(NewScrobble)> {
     ScrobbleTracker::new(move |scrobble: NewScrobble| {
         let conn = conn.lock().unwrap();
         match db::insert_scrobble(&conn, &scrobble) {
             Ok(_) => {
                 eprintln!(
-                    "[scrobbled] {} - {} ({}s)",
-                    scrobble.artist, scrobble.title, scrobble.played_duration_secs
+                    "[scrobbled] {}: {} - {} ({}s)",
+                    scrobble.source, scrobble.artist, scrobble.title, scrobble.played_duration_secs
                 );
             }
             Err(e) => {
                 eprintln!("[error] Failed to insert scrobble: {}", e);
             }
         }
-    })
+    }, source)
 }
 
 // ===========================================================================
@@ -380,6 +418,8 @@ pub struct TestableTracker {
     pub scrobbled: Vec<NewScrobble>,
     /// The current simulated time, in seconds since the start of the test.
     clock_secs: f64,
+    /// Source label attached to every scrobble produced during the test.
+    source: String,
 }
 
 #[cfg(test)]
@@ -392,6 +432,7 @@ impl TestableTracker {
             accumulated_secs: 0.0,
             scrobbled: Vec::new(),
             clock_secs: 0.0,
+            source: "test".to_string(),
         }
     }
 
@@ -426,6 +467,7 @@ impl TestableTracker {
                     track_duration_secs: track_dur,
                     played_duration_secs: self.accumulated_secs.round() as i64,
                     scrobbled_at: format!("test-time-{}", self.clock_secs),
+                    source: self.source.clone(),
                 };
                 self.scrobbled.push(scrobble);
             }
