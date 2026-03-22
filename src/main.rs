@@ -143,6 +143,19 @@ enum Commands {
         #[arg(long)]
         all_time_limit: Option<i64>,
 
+        /// Skip the MPD cover extraction that normally runs before generating
+        /// the report. Useful if MPD is not running or you want a fast run.
+        #[arg(long)]
+        no_enrich: bool,
+
+        /// MPD host for cover extraction (default: localhost).
+        #[arg(long, default_value = "localhost")]
+        mpd_host: String,
+
+        /// MPD port for cover extraction (default: 6600).
+        #[arg(long, default_value = "6600")]
+        mpd_port: u16,
+
         /// Path to the SQLite database file. Same default as `watch`.
         #[arg(long)]
         db_path: Option<String>,
@@ -473,11 +486,13 @@ fn round_to_5(n: i64) -> i64 {
 
 /// Run the `report` subcommand.
 ///
+/// Runs MPD cover extraction first (unless `--no-enrich`), then generates the report.
+///
 /// Three output modes:
 /// - **Terminal** (default): queries a single `--period` and prints ASCII tables.
 /// - **JSON** (`--json`): same single-period data as pretty-printed JSON.
 /// - **HTML** (`--html`): generates a multi-period report (Today / Week / Month /
-///   All Time) with bar charts and album cover art. Auto-runs enrichment first.
+///   All Time) with bar charts and album cover art.
 ///   With `--output <dir>`, writes `index.html` + `covers/` to a directory.
 fn run_report(
     period: &str,
@@ -486,6 +501,8 @@ fn run_report(
     output: Option<&str>,
     limit: i64,
     all_time_limit: i64,
+    no_enrich: bool,
+    mpd_cfg: &mpd::MpdConfig,
     db_path: &str,
 ) {
     let conn = match db::open_db(db_path) {
@@ -512,11 +529,25 @@ fn run_report(
         std::process::exit(1);
     }
 
-    // For HTML reports, enrich only the albums that will actually appear in
-    // the report (across all periods). Uses quiet mode so "nothing to do"
-    // isn't printed when everything is already cached.
-    if html {
+    // Cover enrichment is only meaningful for HTML reports — terminal and JSON
+    // output never displays cover art, so there is nothing to gain from
+    // extracting or downloading covers for those modes.
+    if html && !no_enrich {
+        // Determine exactly which (artist, album) pairs will appear in the
+        // HTML output across all periods. All enrichment is scoped to this set
+        // so we never fetch covers for albums that won't be shown.
         let needed = report::albums_needed_for_report(&conn, limit, all_time_limit);
+
+        // Step 1: Extract embedded covers from MPD (fast, offline, no rate
+        // limits). Only processes albums in `needed` that still have no cover.
+        // Running this before the online step means CAA/iTunes won't waste a
+        // request on an album whose cover is already in the local music file.
+        mpd::run_mpd_cover_enrich_targeted(mpd_cfg, &conn, &needed);
+
+        // Step 2: Online enrichment for albums in `needed` that still have no
+        // cover after the MPD pass (e.g. streams, albums not in the MPD DB).
+        // Respects the 7-day cooldown so we don't hammer MusicBrainz on every
+        // report run.
         enrich::run_enrich_targeted(&conn, &needed, true);
     }
 
@@ -652,12 +683,19 @@ fn main() {
             output,
             limit,
             all_time_limit,
+            no_enrich,
+            mpd_host,
+            mpd_port,
             db_path,
         } => {
             let path = db_path.unwrap_or_else(default_db_path);
             let atl =
                 all_time_limit.unwrap_or_else(|| round_to_5((limit as f64 * 2.5).round() as i64));
-            run_report(&period, json, html, output.as_deref(), limit, atl, &path);
+            let mpd_cfg = mpd::MpdConfig {
+                host: mpd_host,
+                port: mpd_port,
+            };
+            run_report(&period, json, html, output.as_deref(), limit, atl, no_enrich, &mpd_cfg, &path);
         }
         Commands::Enrich {
             online,

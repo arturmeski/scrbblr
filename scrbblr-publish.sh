@@ -67,6 +67,31 @@ while [[ $# -gt 0 ]]; do
       FORCE=1
       shift
       ;;
+    --help|-h)
+      cat <<'EOF'
+Usage: scrbblr-publish [OPTIONS]
+
+Generate and publish the HTML report only when new scrobbles exist.
+Cover art is extracted automatically by `scrbblr report` before each run.
+
+Options:
+  --output <dir>       Directory for generated report files (default: ~/music-report)
+  --remote <target>    rsync destination, e.g. user@host:/var/www/music-report
+  --db-path <path>     Path to scrobbles database (default: auto-detected)
+  --watch              Keep running, checking every --interval seconds
+  --interval <secs>    Seconds between checks in --watch mode (default: 300)
+  --force              Regenerate and publish even if no new scrobbles
+  --help, -h           Show this help and exit
+
+Config file (loaded before flags):
+  $XDG_CONFIG_HOME/scrbblr/publish.conf  (primary)
+  ~/.config/scrbblr/publish.conf         (fallback)
+  ~/.scrbblr-publish.conf                (legacy)
+
+Supported config variables: OUTPUT_DIR, REMOTE_TARGET, DB_PATH
+EOF
+      exit 0
+      ;;
     *)
       printf 'Unknown option: %s\n' "$1" >&2
       exit 2

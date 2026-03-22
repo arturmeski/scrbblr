@@ -942,7 +942,8 @@ fn try_extract_cover(
 /// one; if it finds nothing, the local cover is preserved (see
 /// `db::upsert_album_cache` for the `COALESCE` logic).
 pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
-    // Find all (artist, album) pairs with scrobbles but no cover yet.
+    // Fetch covers for every scrobbled album that still has no cover_url.
+    // Used by the standalone `enrich` command where the scope is the whole DB.
     let albums = match db::albums_without_cover(conn) {
         Ok(a) => a,
         Err(e) => {
@@ -956,7 +957,54 @@ pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
         return;
     }
 
-    // Connect to MPD for this session.
+    run_mpd_cover_enrich_albums(config, conn, albums);
+}
+
+/// Targeted variant: only extract covers for albums that will actually appear
+/// in the report. Avoids fetching covers for the entire DB when only a subset
+/// is needed.
+///
+/// Used by `run_report` so that cover extraction is scoped to the albums the
+/// HTML renderer will actually display.
+pub fn run_mpd_cover_enrich_targeted(
+    config: &MpdConfig,
+    conn: &Connection,
+    needed: &std::collections::HashSet<(String, String)>,
+) {
+    // Start from albums that genuinely have no cover yet, then narrow to the
+    // set the caller cares about. This avoids redundant MPD round-trips for
+    // albums that already have art.
+    let albums = match db::albums_without_cover(conn) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[error] Failed to query albums without cover: {}", e);
+            return;
+        }
+    };
+
+    let albums: Vec<_> = albums
+        .into_iter()
+        .filter(|a| needed.contains(&(a.artist.clone(), a.album.clone())))
+        .collect();
+
+    if albums.is_empty() {
+        // Quiet: the caller knows this is a background step, no need to
+        // announce that nothing was missing.
+        return;
+    }
+
+    run_mpd_cover_enrich_albums(config, conn, albums);
+}
+
+/// Inner loop shared by `run_mpd_cover_enrich` and
+/// `run_mpd_cover_enrich_targeted`. Connects to MPD and processes the given
+/// album list.
+fn run_mpd_cover_enrich_albums(
+    config: &MpdConfig,
+    conn: &Connection,
+    albums: Vec<db::UncachedAlbum>,
+) {
+    // Connect to MPD once for the whole batch.
     let mut mpd_conn = match connect(config) {
         Ok(c) => c,
         Err(e) => {
@@ -964,12 +1012,6 @@ pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
             return;
         }
     };
-
-    // Remove the read timeout for cover extraction — readpicture responses can
-    // be large and we don't need the idle-loop timeout here.
-    // We can't easily change the timeout on a Box<dyn Read>, so we just proceed
-    // with the existing short timeout but retry reads as needed. In practice,
-    // readpicture transfers are fast on a local socket.
 
     let covers = enrich::covers_dir();
     eprintln!(
@@ -989,7 +1031,8 @@ pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
             album.album
         );
 
-        // Step 1: Ask MPD for a file from this album.
+        // Step 1: Ask MPD for any file from this album so we have a path to
+        // hand to readpicture.
         let file_uri = match search_song_for_album(&mut mpd_conn, &album.artist, &album.album) {
             Some(f) => f,
             None => {
@@ -1010,8 +1053,8 @@ pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
             }
         };
 
-        // Step 3: Resize and re-encode the image to stay consistent with
-        // covers downloaded from the Cover Art Archive.
+        // Step 3: Resize and re-encode to stay consistent with covers
+        // downloaded from the Cover Art Archive.
         let processed = match enrich::resize_cover_bytes(&picture_bytes) {
             Some(b) => b,
             None => {
@@ -1030,7 +1073,7 @@ pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
             continue;
         }
 
-        // Step 5: Record the local path in album_cache so the report generator
+        // Step 5: Record the local path in album_cache so the HTML renderer
         // and the online enrich command can find it.
         let cover_path = dest.to_string_lossy().to_string();
         match db::set_local_cover(conn, &album.artist, &album.album, &cover_path) {
