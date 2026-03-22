@@ -4,35 +4,35 @@ A local music scrobbler for MPRIS-compatible players and MPD, built in Rust. It 
 
 ## Features
 
-- **Dual source scrobbling** — tracks both MPRIS players (via `playerctl`) and MPD simultaneously; each maintains its own tracker writing to the same database
-- **Accurate play time tracking** — monitors both metadata changes and play/pause status, so paused time doesn't count toward scrobble thresholds
-- **Last.fm-style scrobble rules** — a track is scrobbled after 50% of its duration or 4 minutes of play, whichever is shorter
-- **Local storage** — all data stays on your machine in a single SQLite file
-- **Reports** — terminal tables or JSON output, filterable by time period (today, week, month, year, all time)
-- **Adaptive terminal tables** — report columns shrink to fit narrower terminal widths
-- **HTML reports** — generate a standalone dark-themed HTML file with album art cards, bar charts, and genre pills
-- **Source colour-coding** — album cards and bar table rows are tinted by dominant scrobble source (MPRIS vs MPD), with a consistent per-source colour palette
-- **Fair ranking tie-breaks** — top artists/albums/tracks are ranked by plays first, then total listen time
-- **Genre stats** — reports include top genres and per-period "Mood" labels; single-word broad genres (e.g. "ambient", "electronic") are deprioritised below multi-word ones
-- **Mobile-optimised report** — responsive layout with a sticky jump nav; bar graphs drop on small screens leaving just rank + duration
-- **Terminal-style typography** — HTML uses JetBrains Mono with monospace fallbacks
-- **Enrichment** — extract embedded covers from MPD music files (offline), and/or fetch album art + genres from MusicBrainz / iTunes / Cover Art Archive
-- **Targeted enrichment** — `report --html` fetches covers only for the albums that actually appear in the report, not the entire library
-- **Incremental publish helper** — query latest scrobble and publish only when new data exists
-- **Configurable player** — MPRIS player defaults to `com.blitzfc.qbz`, configurable via `--player`
+- **Dual source scrobbling** -- tracks both MPRIS players (via `playerctl`) and MPD simultaneously; each maintains its own tracker writing to the same database
+- **Accurate play time tracking** -- monitors both metadata changes and play/pause status, so paused time doesn't count toward scrobble thresholds
+- **Last.fm-style scrobble rules** -- a track is scrobbled after 50% of its duration or 4 minutes of play, whichever is shorter
+- **Local storage** -- all data stays on your machine in a single SQLite file
+- **Reports** -- terminal tables or JSON output, filterable by time period (today, week, month, year, all time)
+- **Adaptive terminal tables** -- report columns shrink to fit narrower terminal widths
+- **HTML reports** -- generate a standalone dark-themed HTML file with album art cards, bar charts, and genre pills
+- **Source colour-coding** -- album cards and bar table rows are tinted by dominant scrobble source (MPRIS vs MPD), with a consistent per-source colour palette
+- **Fair ranking tie-breaks** -- top artists/albums/tracks are ranked by plays first, then total listen time
+- **Genre stats** -- reports include top genres and per-period "Mood" labels; single-word broad genres (e.g. "ambient", "electronic") are deprioritised below multi-word ones
+- **Mobile-optimised report** -- responsive layout with a sticky jump nav; bar graphs drop on small screens leaving just rank + duration
+- **Terminal-style typography** -- HTML uses JetBrains Mono with monospace fallbacks
+- **Enrichment** -- extract embedded covers from MPD music files (offline), and/or fetch album art + genres from MusicBrainz / iTunes / Cover Art Archive
+- **Targeted enrichment** -- `report --html` fetches covers only for the albums that actually appear in the report, not the entire library
+- **Incremental publish helper** -- query latest scrobble and publish only when new data exists
+- **Configurable player** -- MPRIS player defaults to `com.blitzfc.qbz`, configurable via `--player`
 
 ## Requirements
 
 - Rust toolchain (for building)
-- [playerctl](https://github.com/altdesktop/playerctl) — required only for MPRIS scrobbling; omit with `--no-mpris` if you use MPD only
-- MPD — required only for MPD scrobbling; omit with `--no-mpd` if you use MPRIS only
+- [playerctl](https://github.com/altdesktop/playerctl) -- required only for MPRIS scrobbling; omit with `--no-mpris` if you use MPD only
+- MPD -- required only for MPD scrobbling; omit with `--no-mpd` if you use MPRIS only
 
 ## Installation
 
 ### Quick install (interactive)
 
 The repo includes an interactive install script that builds the binary, installs it,
-sets up the systemd service, and starts it — asking before each step:
+sets up the systemd service, and starts it -- asking before each step:
 
 ```bash
 ./install.sh
@@ -104,7 +104,7 @@ loginctl enable-linger "$USER"
 
 ### Important session note
 
-`playerctl` and MPRIS are tied to the session D-Bus. The scrobbler must run in the **same user/session** as your player. If the player runs under another account/session, this service will not see it. MPD does not have this restriction — it connects over TCP or Unix socket.
+`playerctl` and MPRIS are tied to the session D-Bus. The scrobbler must run in the **same user/session** as your player. If the player runs under another account/session, this service will not see it. MPD does not have this restriction -- it connects over TCP or Unix socket.
 
 ## Report workflow
 
@@ -127,7 +127,7 @@ This creates a self-contained directory:
     └── ...
 ```
 
-When `--html` is used, enrichment runs automatically before rendering — first extracting embedded covers from MPD for any albums that appear in the report, then fetching missing covers/genres online. Use `--no-enrich` to skip this step.
+When `--html` is used, enrichment runs automatically before rendering -- first extracting embedded covers from MPD for any albums that appear in the report, then fetching missing covers/genres online. Use `--no-enrich` to skip this step.
 
 ## Building
 
@@ -292,7 +292,7 @@ scrbblr pin-album [OPTIONS]
 
 Enrichment runs in two stages:
 
-**Stage 1 — MPD embedded covers (offline, no network)**
+**Stage 1 -- MPD embedded covers (offline, no network)**
 
 By default, `enrich` connects to MPD and extracts embedded cover art from your music files using MPD's `readpicture` command. This is fast, works entirely offline, and only processes albums scrobbled via MPD that don't yet have a cover:
 
@@ -300,7 +300,7 @@ By default, `enrich` connects to MPD and extracts embedded cover art from your m
 scrbblr enrich
 ```
 
-**Stage 2 — Online lookup (MusicBrainz + iTunes + Cover Art Archive)**
+**Stage 2 -- Online lookup (MusicBrainz + iTunes + Cover Art Archive)**
 
 Pass `--online` to also query MusicBrainz for album metadata (MBID, genres) and download covers for albums that still have none after the MPD pass:
 
@@ -350,7 +350,7 @@ Downloaded covers are stored in:
 
 #### Manually pinning an album (`pin-album`)
 
-Sometimes automatic search fails — most commonly for classical recordings where
+Sometimes automatic search fails -- most commonly for classical recordings where
 the scrobbled artist tag (e.g. a choir or soloist) doesn't match the release
 credits on MusicBrainz, or where the album title wording differs significantly.
 Enrich will print:
@@ -390,7 +390,7 @@ scrbblr pin-album \
 ```
 
 The image is downloaded, resized to 500 px, and stored locally just like a
-Cover Art Archive image. Any HTTPS image URL works — Discogs, Wikipedia,
+Cover Art Archive image. Any HTTPS image URL works -- Discogs, Wikipedia,
 Bandcamp, etc.
 
 ### Incremental publish script
@@ -467,14 +467,14 @@ Each scrobble records:
 
 The `watch` command spawns two `playerctl --follow` child processes:
 
-1. **Metadata follower** — emits a line each time the track changes
-2. **Status follower** — emits `Playing`, `Paused`, or `Stopped` on state changes
+1. **Metadata follower** -- emits a line each time the track changes
+2. **Status follower** -- emits `Playing`, `Paused`, or `Stopped` on state changes
 
 Each process gets its own reader thread that sends typed events over an `mpsc` channel to the main thread. The main thread owns a `ScrobbleTracker` state machine, which processes events sequentially and decides when to write scrobbles to the database.
 
 ### MPD watcher
 
-Unless `--no-mpd` is passed, a separate thread connects to MPD using the idle protocol and runs its own `ScrobbleTracker`. It writes to the same database independently — no synchronisation is needed between the two watchers. The MPD watcher connects over TCP (default: `localhost:6600`) or a Unix socket if a socket path is given as `--mpd-host`.
+Unless `--no-mpd` is passed, a separate thread connects to MPD using the idle protocol and runs its own `ScrobbleTracker`. It writes to the same database independently -- no synchronisation is needed between the two watchers. The MPD watcher connects over TCP (default: `localhost:6600`) or a Unix socket if a socket path is given as `--mpd-host`.
 
 Both watchers observe a shared shutdown flag. Ctrl+C sets it to false; the MPRIS main loop also receives an `Eof` event through its channel. The MPD watcher notices the flag on its next idle timeout (≤ 500 ms).
 
