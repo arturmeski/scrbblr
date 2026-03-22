@@ -782,6 +782,15 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
         .filter_map(|(p, l)| gather_report(conn, p, *l).ok())
         .collect();
 
+    // Build a stable source → colour index from all-time play counts so that
+    // the same source always gets the same colour regardless of which period
+    // is being rendered. Most-played source gets palette slot 0, and so on.
+    let ordered_sources: Vec<String> = db::top_sources(conn, "all")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.source)
+        .collect();
+
     let mut cover_files: Vec<std::path::PathBuf> = Vec::new();
     let mut h = HtmlWriter::new();
 
@@ -915,11 +924,28 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                 .top_sources
                 .iter()
                 .enumerate()
-                .map(|(i, s)| BarRow {
-                    cells: vec![(i + 1).to_string(), s.source.clone()],
-                    value: s.scrobbles,
-                    suffix: format_duration(s.listen_time_secs),
-                    cover: None,
+                .map(|(i, s)| {
+                    // Prefix the source name with a colour dot matching the
+                    // palette slot assigned to it in the all-time ranking.
+                    let label = if let Some((bg, _)) =
+                        source_colours(&s.source, &ordered_sources)
+                    {
+                        format!(
+                            "<span style=\"display:inline-block;width:9px;height:9px;\
+                             border-radius:50%;background:{};margin-right:5px;\
+                             vertical-align:middle\"></span>{}",
+                            bg, html_escape(&s.source)
+                        )
+                    } else {
+                        html_escape(&s.source)
+                    };
+                    BarRow {
+                        cells: vec![(i + 1).to_string(), label],
+                        value: s.scrobbles,
+                        suffix: format_duration(s.listen_time_secs),
+                        cover: None,
+                        raw_cells: true,
+                    }
                 })
                 .collect();
             write_bar_table(
@@ -954,7 +980,19 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     &a.album,
                     meta.as_ref().and_then(|m| m.mbid.as_deref()),
                 );
-                h.open("<article class=\"album\">");
+                // Tint the card background with the dominant source's colour.
+                let card_style = a
+                    .dominant_source
+                    .as_deref()
+                    .and_then(|src| source_colours(src, &ordered_sources))
+                    .map(|(bg, border)| {
+                        format!(
+                            " style=\"background:{};border-color:{}\"",
+                            bg, border
+                        )
+                    })
+                    .unwrap_or_default();
+                h.linef(format_args!("<article class=\"album\"{}>", card_style));
 
                 let cover_rel = resolve_cover(
                     meta.as_ref().and_then(|m| m.cover_url.clone()),
@@ -1029,6 +1067,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     value: a.plays,
                     suffix: format_duration(a.listen_time_secs),
                     cover,
+                    raw_cells: false,
                 }
             })
             .collect();
@@ -1056,6 +1095,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     value: a.plays,
                     suffix: format_duration(a.listen_time_secs),
                     cover,
+                    raw_cells: false,
                 }
             })
             .collect();
@@ -1076,6 +1116,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                 value: g.plays,
                 suffix: format_duration(g.listen_time_secs),
                 cover: None,
+                raw_cells: false,
             })
             .collect();
         write_bar_table(
@@ -1102,6 +1143,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     value: t.plays,
                     suffix: format_duration(t.listen_time_secs),
                     cover,
+                    raw_cells: false,
                 }
             })
             .collect();
@@ -1272,6 +1314,32 @@ tr:last-child td { border-bottom: none; }
 }
 ";
 
+/// Source colour palette — muted tints that work as card backgrounds on the
+/// dark theme. Assigned in order to sources ranked by all-time scrobble count,
+/// so the most-listened source always gets the first colour.
+///
+/// Format: (background tint, border accent)
+const SOURCE_PALETTE: &[(&str, &str)] = &[
+    ("rgba(240,192,106,0.10)", "rgba(240,192,106,0.30)"), // amber  (warm)
+    ("rgba(100,160,240,0.10)", "rgba(100,160,240,0.30)"), // blue   (cool)
+    ("rgba(140,210,130,0.10)", "rgba(140,210,130,0.30)"), // green
+    ("rgba(200,130,220,0.10)", "rgba(200,130,220,0.30)"), // purple
+    ("rgba(220,130,130,0.10)", "rgba(220,130,130,0.30)"), // red
+];
+
+/// Look up the card background and border colours for a source name, given
+/// the ordered list of all-time sources (most played first).
+fn source_colours<'a>(
+    source: &str,
+    ordered_sources: &[String],
+) -> Option<(&'a str, &'a str)> {
+    ordered_sources
+        .iter()
+        .position(|s| s == source)
+        .and_then(|i| SOURCE_PALETTE.get(i % SOURCE_PALETTE.len()))
+        .copied()
+}
+
 /// Desktop column count for the album cover grid.
 const ALBUM_GRID_COLUMNS: i64 = 6;
 
@@ -1403,6 +1471,8 @@ struct BarRow {
     suffix: String,
     /// Relative path to a cover image (e.g., "covers/UUID.jpg"), or None.
     cover: Option<String>,
+    /// When true, `cells` contain pre-escaped HTML and must not be escaped again.
+    raw_cells: bool,
 }
 
 /// Render a table where the last column is a horizontal bar chart.
@@ -1451,7 +1521,11 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
             }
         }
         for cell in &row.cells {
-            h.linef(format_args!("<td>{}</td>", html_escape(cell)));
+            if row.raw_cells {
+                h.linef(format_args!("<td>{}</td>", cell));
+            } else {
+                h.linef(format_args!("<td>{}</td>", html_escape(cell)));
+            }
         }
         let pct = (row.value as f64 / max_val as f64 * 100.0).round() as u32;
         h.linef(format_args!("<td>{}</td>", row.value));
@@ -1691,7 +1765,7 @@ mod tests {
                 title: "This Is a Trick".into(),
                 track_duration_secs: Some(186),
                 played_duration_secs: 186,
-                scrobbled_at: "2026-03-19T10:00:00".into(),
+                scrobbled_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 source: "test".into(),
             },
             db::NewScrobble {
@@ -1700,7 +1774,7 @@ mod tests {
                 title: "Telepathy".into(),
                 track_duration_secs: Some(215),
                 played_duration_secs: 200,
-                scrobbled_at: "2026-03-19T10:05:00".into(),
+                scrobbled_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 source: "test".into(),
             },
             db::NewScrobble {
@@ -1709,7 +1783,7 @@ mod tests {
                 title: "Digital Bath".into(),
                 track_duration_secs: Some(291),
                 played_duration_secs: 291,
-                scrobbled_at: "2026-03-19T10:10:00".into(),
+                scrobbled_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 source: "test".into(),
             },
         ];
@@ -1748,7 +1822,7 @@ mod tests {
                 title: "Song".into(),
                 track_duration_secs: Some(180),
                 played_duration_secs: 180,
-                scrobbled_at: "2026-03-19T10:00:00".into(),
+                scrobbled_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 source: "test".into(),
             },
         )
@@ -1771,7 +1845,7 @@ mod tests {
                 title: "Test Song".into(),
                 track_duration_secs: Some(180),
                 played_duration_secs: 170,
-                scrobbled_at: "2026-03-19T10:00:00".into(),
+                scrobbled_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
                 source: "test".into(),
             },
         )
@@ -1784,7 +1858,7 @@ mod tests {
                 musicbrainz_id: None,
                 cover_url: None,
                 genre: Some("trip hop".into()),
-                fetched_at: "2026-03-19T10:10:00".into(),
+                fetched_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
             },
         )
         .unwrap();

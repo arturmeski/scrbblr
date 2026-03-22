@@ -97,6 +97,9 @@ pub struct TopAlbum {
     pub album: String,
     pub plays: i64,
     pub listen_time_secs: i64,
+    /// The source (player) responsible for the most scrobbles of this album
+    /// in the queried period. `None` for historical rows without a source.
+    pub dominant_source: Option<String>,
 }
 
 /// A row in the "top tracks" ranking, grouped by (artist, title).
@@ -443,6 +446,15 @@ pub fn top_albums(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
     //
     // The displayed artist is similarly resolved: the enriched (cached)
     // artist takes priority so that album_cache_meta() can find the cover.
+    // The outer query uses `whr` which starts with " WHERE ...".
+    // The dominant_source subquery already has its own WHERE, so we need an
+    // AND-form of the same filter to avoid double WHERE.
+    let subquery_period_filter = if whr.is_empty() {
+        String::new()
+    } else {
+        " AND s2.scrobbled_at BETWEEN ?1 AND ?2".to_string()
+    };
+
     let sql = format!(
         "SELECT
              CASE WHEN c.artist IS NOT NULL THEN s.artist
@@ -455,7 +467,16 @@ pub fn top_albums(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
              END AS artist,
              s.album AS album,
              COUNT(*) AS plays,
-             COALESCE(SUM(s.played_duration_secs), 0) AS listen_time
+             COALESCE(SUM(s.played_duration_secs), 0) AS listen_time,
+             -- Dominant source: the player responsible for the most scrobbles
+             -- of this album in the queried period. Used to colour-code cards.
+             (SELECT s2.source
+              FROM scrobbles s2
+              WHERE s2.album = s.album
+                AND s2.source IS NOT NULL{}
+              GROUP BY s2.source
+              ORDER BY COUNT(*) DESC
+              LIMIT 1) AS dominant_source
          FROM scrobbles s
          LEFT JOIN album_cache c ON c.artist = s.artist AND c.album = s.album{}
          GROUP BY s.album, COALESCE(
@@ -467,7 +488,7 @@ pub fn top_albums(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
          )
          ORDER BY plays DESC, listen_time DESC, artist ASC, album ASC
          LIMIT {}",
-        whr, limit
+        subquery_period_filter, whr, limit
     );
 
     let mut stmt = conn.prepare(&sql)?;
@@ -477,6 +498,7 @@ pub fn top_albums(conn: &Connection, period: &str, limit: i64) -> Result<Vec<Top
             album: row.get(1)?,
             plays: row.get(2)?,
             listen_time_secs: row.get(3)?,
+            dominant_source: row.get(4)?,
         })
     };
     if p.is_empty() {
