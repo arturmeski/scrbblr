@@ -869,6 +869,31 @@ pub fn albums_without_cover(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
     rows.collect()
 }
 
+/// Like [`albums_without_cover`] but restricted to albums where at least one
+/// scrobble came from MPD (`source = 'MPD'`).
+///
+/// There is no point asking MPD for a cover art of an album that was scrobbled
+/// entirely via an MPRIS player (e.g. Qobuz, Spotify) — MPD almost certainly
+/// does not have that file on disk. This query avoids those wasted round-trips.
+pub fn albums_without_cover_from_mpd(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT s.artist, s.album
+         FROM scrobbles s
+         LEFT JOIN album_cache c ON s.artist = c.artist AND s.album = c.album
+         WHERE s.album != ''
+           AND s.source = 'MPD'
+           AND (c.id IS NULL OR c.cover_url IS NULL)
+         ORDER BY s.artist, s.album",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(UncachedAlbum {
+            artist: row.get(0)?,
+            album: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Cached album metadata returned by [`album_cache_meta`].
 #[derive(Debug, Clone)]
 pub struct AlbumCacheMeta {

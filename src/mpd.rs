@@ -942,9 +942,10 @@ fn try_extract_cover(
 /// one; if it finds nothing, the local cover is preserved (see
 /// `db::upsert_album_cache` for the `COALESCE` logic).
 pub fn run_mpd_cover_enrich(config: &MpdConfig, conn: &Connection) {
-    // Fetch covers for every scrobbled album that still has no cover_url.
-    // Used by the standalone `enrich` command where the scope is the whole DB.
-    let albums = match db::albums_without_cover(conn) {
+    // Only consider albums where at least one scrobble came from MPD — albums
+    // scrobbled exclusively via MPRIS players (Qobuz, Spotify, etc.) are
+    // unlikely to be present in MPD's music database.
+    let albums = match db::albums_without_cover_from_mpd(conn) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("[error] Failed to query albums without cover: {}", e);
@@ -971,10 +972,10 @@ pub fn run_mpd_cover_enrich_targeted(
     conn: &Connection,
     needed: &std::collections::HashSet<(String, String)>,
 ) {
-    // Start from albums that genuinely have no cover yet, then narrow to the
-    // set the caller cares about. This avoids redundant MPD round-trips for
-    // albums that already have art.
-    let albums = match db::albums_without_cover(conn) {
+    // Start from albums that have no cover AND were scrobbled via MPD — albums
+    // from MPRIS-only players are excluded because MPD won't have those files.
+    // Then narrow further to the set the caller cares about.
+    let albums = match db::albums_without_cover_from_mpd(conn) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("[error] Failed to query albums without cover: {}", e);
