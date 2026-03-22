@@ -1309,6 +1309,9 @@ tr:last-child td { border-bottom: none; }
 .mono { font-family: \"JetBrains Mono\", \"Fira Code\", \"IBM Plex Mono\", \"Cascadia Code\", \"SFMono-Regular\", Menlo, Consolas, monospace; }
 .bar-cell { width: 40%; }
 .bar-wrap { display: flex; align-items: center; gap: 8px; }
+/* bar-track is flex:1 so the bar width% is relative to the available track space,
+   not the whole bar-wrap container (which includes the label). Fixes proportionality. */
+.bar-track { flex: 1; }
 .bar { height: 18px; border-radius: 4px; background: var(--bar-fill); min-width: 2px; }
 .bar-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
@@ -1344,9 +1347,14 @@ tr:last-child td { border-bottom: none; }
 .note { margin-top: 18px; color: var(--muted); font-size: 12px; }
 @media (max-width: 980px) { .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 700px) {
+  body { font-size: 13px; }
   .wrap { padding: 16px 12px 36px; }
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .jump-nav { margin-top: 10px; padding: 7px; }
+  /* On mobile show rank + duration only; drop the raw play-count and the bar graphic.
+     The .bar-label (duration text) remains visible inside .bar-cell. */
+  .play-count { display: none; }
+  .bar { display: none; }
 }
 ";
 
@@ -1564,11 +1572,14 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
             }
         }
         let pct = (row.value as f64 / max_val as f64 * 100.0).round() as u32;
-        h.linef(format_args!("<td>{}</td>", row.value));
+        // play-count is hidden on mobile via CSS; bar-label (duration) stays visible
+        h.linef(format_args!("<td class=\"play-count\">{}</td>", row.value));
         h.linef(format_args!(
             "<td class=\"bar-cell\">\n\
              {s}  <div class=\"bar-wrap\">\n\
-             {s}    <div class=\"bar\" style=\"width:{pct}%\"></div>\n\
+             {s}    <div class=\"bar-track\">\n\
+             {s}      <div class=\"bar\" style=\"width:{pct}%\"></div>\n\
+             {s}    </div>\n\
              {s}    <span class=\"bar-label\">{suffix}</span>\n\
              {s}  </div>\n\
              {s}</td>",
