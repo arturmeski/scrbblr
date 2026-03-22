@@ -38,6 +38,11 @@
 //! - Cover Art Archive (release-group, any edition):
 //!   `https://coverartarchive.org/release-group/{rgid}/front`
 //!
+//! - iTunes Search API (fallback when CAA has no cover):
+//!   `https://itunes.apple.com/search?term={artist}+{album}&entity=album&limit=5`
+//!   Returns `artworkUrl100`; the dimension suffix is bumped to `600x600bb`
+//!   before downloading. No authentication required.
+//!
 //! ## User-Agent
 //!
 //! MusicBrainz requires a descriptive User-Agent header. We use:
@@ -763,6 +768,61 @@ pub fn resize_cover_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// ---------------------------------------------------------------------------
+// iTunes Search API — cover art fallback
+// ---------------------------------------------------------------------------
+
+/// Generate a stable filename stem for a cover sourced from iTunes.
+///
+/// Uses the same FNV-1a 64-bit hash approach as the MPD cover extractor,
+/// keyed on `"artist\talbum"`, so the filename is deterministic across runs.
+/// Prefixed with `"itunes_"` to distinguish from MBID-based filenames.
+fn itunes_cover_stem(artist: &str, album: &str) -> String {
+    const FNV_OFFSET: u64 = 14695981039346656037;
+    const FNV_PRIME: u64 = 1099511628211;
+
+    let input = format!("{}\t{}", artist, album);
+    let mut hash = FNV_OFFSET;
+    for byte in input.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("itunes_{:016x}", hash)
+}
+
+/// Search the iTunes Store for the front cover of an album.
+///
+/// Uses Apple's public search API — no authentication required. Searches
+/// for `"{artist} {album}"` with `entity=album`, takes the first result,
+/// and returns a URL to the 600×600 version of the artwork (upgraded from
+/// the default 100×100 thumbnail in the API response).
+///
+/// Returns `None` if no results are found or the request fails.
+fn fetch_itunes_cover_url(client: &Client, artist: &str, album: &str) -> Option<String> {
+    // Combine artist and album into a single search query.
+    let query = urlencoded(&format!("{} {}", artist, album));
+    let url = format!(
+        "https://itunes.apple.com/search?term={}&entity=album&limit=5",
+        query
+    );
+
+    let response = client.get(&url).send().ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = response.json().ok()?;
+    let results = json.get("results")?.as_array()?;
+
+    // Take the first result's artwork URL and bump the resolution.
+    // Apple's URLs end in "100x100bb.jpg" — replace with "600x600bb".
+    results.iter().find_map(|r| {
+        r.get("artworkUrl100")?
+            .as_str()
+            .map(|s| s.replace("100x100bb", "600x600bb"))
+    })
+}
+
 /// Attempt to download an image from the given URL and save it to `dest`.
 /// The image is resized to at most `MAX_COVER_DIM` pixels per side before
 /// being written, to keep cached covers from consuming excessive disk space.
@@ -892,14 +952,29 @@ fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: b
         let candidates = search_releases(&client, &album.artist, &album.album);
 
         if candidates.is_empty() {
-            eprintln!("  No match found on MusicBrainz.");
+            eprintln!("  No match found on MusicBrainz. Trying iTunes...");
 
-            // Cache a "no match" entry so we don't re-query next time.
+            // Fall back to iTunes for cover art even without an MBID.
+            let cover = fetch_itunes_cover_url(&client, &album.artist, &album.album)
+                .and_then(|art_url| {
+                    let stem = itunes_cover_stem(&album.artist, &album.album);
+                    let dest = covers.join(format!("{}.jpg", stem));
+                    try_download(&client, &art_url, &dest)
+                });
+
+            if cover.is_some() {
+                eprintln!("  Cover downloaded (from iTunes).");
+                cover_count += 1;
+            } else {
+                eprintln!("  No cover art available from any source.");
+            }
+
+            // Cache the entry (with or without cover) so we don't re-query next time.
             let entry = AlbumCacheEntry {
                 artist: album.artist.clone(),
                 album: album.album.clone(),
                 musicbrainz_id: None,
-                cover_url: None,
+                cover_url: cover,
                 genre: None,
                 fetched_at: now_str(),
             };
@@ -945,6 +1020,21 @@ fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: b
                     cover = Some(path);
                     break;
                 }
+            }
+        }
+
+        // Step 5: If still no cover, try iTunes as a last resort.
+        if cover.is_none() {
+            eprintln!("  No cover from CAA. Trying iTunes...");
+            cover = fetch_itunes_cover_url(&client, &album.artist, &album.album)
+                .and_then(|art_url| {
+                    // Reuse the MBID-based filename so the file is still
+                    // associated with the release even though it came from iTunes.
+                    let dest = covers.join(format!("{}.jpg", primary_mbid));
+                    try_download(&client, &art_url, &dest)
+                });
+            if cover.is_some() {
+                eprintln!("  Cover downloaded (from iTunes).");
             }
         }
 

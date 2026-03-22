@@ -685,6 +685,20 @@ pub struct UncachedAlbum {
 /// This ensures albums are re-tried if a previous run failed to find cover art
 /// or genre metadata, but only after a cooldown to avoid hitting MusicBrainz
 /// on every single report generation.
+/// Reset the `fetched_at` timestamp to NULL for all `album_cache` rows that
+/// have no `cover_url`. This makes [`uncached_albums`] pick them up again on
+/// the next enrichment run, bypassing the 7-day cooldown.
+///
+/// Used by `enrich --online --retry-covers` to re-attempt cover downloads
+/// without forcing a full re-fetch of all albums.
+pub fn reset_missing_cover_timestamps(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache SET fetched_at = NULL WHERE cover_url IS NULL",
+        [],
+    )?;
+    Ok(count)
+}
+
 pub fn uncached_albums(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
     // Retry incomplete cache entries at most once per 7 days.
     let retry_before = (chrono::Local::now().naive_local() - chrono::Duration::days(7))

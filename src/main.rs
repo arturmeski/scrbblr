@@ -168,6 +168,13 @@ enum Commands {
         #[arg(long)]
         force: bool,
 
+        /// Re-attempt cover downloads for albums that have metadata cached
+        /// but no cover art yet. Resets the 7-day cooldown for those albums
+        /// only, so the next `--online` run retries them. Does not affect
+        /// albums that already have a cover.
+        #[arg(long)]
+        retry_covers: bool,
+
         /// Disable the MPD embedded cover extraction step. By default,
         /// `enrich` connects to MPD and extracts embedded cover art from
         /// music files via `readpicture` before doing anything else.
@@ -655,6 +662,7 @@ fn main() {
         Commands::Enrich {
             online,
             force,
+            retry_covers,
             no_mpd_covers,
             mpd_host,
             mpd_port,
@@ -689,6 +697,15 @@ fn main() {
 
             // Online enrichment: MusicBrainz lookup for MBID + genre, Cover Art
             // Archive for any albums still missing a cover after the MPD pass.
+            // Reset the cooldown for cover-missing albums before the online
+            // pass so they are picked up by uncached_albums.
+            if retry_covers {
+                match db::reset_missing_cover_timestamps(&conn) {
+                    Ok(n) => eprintln!("Reset cooldown for {} album(s) missing covers.", n),
+                    Err(e) => eprintln!("[warn] Failed to reset cover timestamps: {}", e),
+                }
+            }
+
             if online {
                 enrich::run_enrich(&conn, force, false);
             }
