@@ -6,9 +6,9 @@ set -euo pipefail
 # Defaults can be overridden by config file and then by flags:
 #
 # Config file precedence:
-#   1) $XDG_CONFIG_HOME/mpris-scrobbler/publish.conf
-#   2) ~/.config/mpris-scrobbler/publish.conf
-#   3) ~/.mpris-scrobbler-publish.conf (legacy fallback)
+#   1) $XDG_CONFIG_HOME/scrbblr/publish.conf
+#   2) ~/.config/scrbblr/publish.conf
+#   3) ~/.scrbblr-publish.conf (legacy fallback)
 #
 # Supported config variables:
 #   OUTPUT_DIR
@@ -30,8 +30,8 @@ INTERVAL=300
 FORCE=0
 
 XDG_CONFIG_BASE="${XDG_CONFIG_HOME:-${HOME}/.config}"
-PRIMARY_CONFIG="${XDG_CONFIG_BASE}/mpris-scrobbler/publish.conf"
-LEGACY_CONFIG="${HOME}/.mpris-scrobbler-publish.conf"
+PRIMARY_CONFIG="${XDG_CONFIG_BASE}/scrbblr/publish.conf"
+LEGACY_CONFIG="${HOME}/.scrbblr-publish.conf"
 
 if [[ -f "${PRIMARY_CONFIG}" ]]; then
   # shellcheck disable=SC1090
@@ -79,8 +79,8 @@ if [[ ! "${INTERVAL}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
-if ! command -v mpris-scrobbler >/dev/null 2>&1; then
-  printf 'mpris-scrobbler not found in PATH\n' >&2
+if ! command -v scrbblr >/dev/null 2>&1; then
+  printf 'scrbblr not found in PATH\n' >&2
   exit 1
 fi
 
@@ -90,7 +90,7 @@ if ! command -v rsync >/dev/null 2>&1; then
 fi
 
 STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
-STATE_DIR="${STATE_HOME}/mpris-scrobbler"
+STATE_DIR="${STATE_HOME}/scrbblr"
 MARKER_FILE="${STATE_DIR}/last-published-scrobble.txt"
 mkdir -p "${STATE_DIR}"
 
@@ -101,7 +101,7 @@ do_publish() {
   fi
 
   local latest_scrobble
-  latest_scrobble="$(mpris-scrobbler last-scrobble "${last_args[@]}")"
+  latest_scrobble="$(scrbblr last-scrobble "${last_args[@]}")"
   if [[ -z "${latest_scrobble}" ]]; then
     printf 'No scrobbles yet. Nothing to publish.\n'
     return 0
@@ -127,7 +127,7 @@ do_publish() {
   if [[ -n "${DB_PATH}" ]]; then
     report_args+=(--db-path "${DB_PATH}")
   fi
-  mpris-scrobbler "${report_args[@]}"
+  scrbblr "${report_args[@]}"
 
   printf 'Publishing via rsync to %s...\n' "${REMOTE_TARGET}"
   rsync -Pavz "${OUTPUT_DIR}" "${REMOTE_TARGET}"

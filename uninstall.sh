@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Interactive uninstaller for mpris-scrobbler.
+# Interactive uninstaller for scrbblr.
 #
 # Steps:
 #   1. Stop and disable the systemd user service
@@ -12,13 +12,13 @@
 
 set -euo pipefail
 
-BIN_NAME="mpris-scrobbler"
-PUBLISH_BIN_NAME="mpris-scrobbler-publish"
+BIN_NAME="scrbblr"
+PUBLISH_BIN_NAME="scrbblr-publish"
 INSTALL_DIR="$HOME/.local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_NAME="mpris-scrobbler.service"
+SERVICE_NAME="scrbblr.service"
 
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mpris-scrobbler"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/scrbblr"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'

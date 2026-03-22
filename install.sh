@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Interactive installer for mpris-scrobbler.
+# Interactive installer for scrbblr.
 #
 # Steps:
 #   1. Build release binary
@@ -14,16 +14,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN_NAME="mpris-scrobbler"
-PUBLISH_SCRIPT_NAME="mpris-scrobbler-publish.sh"
-PUBLISH_INSTALLED_NAME="mpris-scrobbler-publish"
+BIN_NAME="scrbblr"
+PUBLISH_SCRIPT_NAME="scrbblr-publish.sh"
+PUBLISH_INSTALLED_NAME="scrbblr-publish"
 PUBLISH_CONFIG_EXAMPLE_SRC="$SCRIPT_DIR/contrib/examples/publish.conf.example"
-PUBLISH_CONFIG_DIR="$HOME/.config/mpris-scrobbler"
+PUBLISH_CONFIG_DIR="$HOME/.config/scrbblr"
 PUBLISH_CONFIG_FILE="$PUBLISH_CONFIG_DIR/publish.conf"
 INSTALL_DIR="$HOME/.local/bin"
-SERVICE_SRC="$SCRIPT_DIR/contrib/systemd/user/mpris-scrobbler.service"
+SERVICE_SRC="$SCRIPT_DIR/contrib/systemd/user/scrbblr.service"
 SERVICE_DIR="$HOME/.config/systemd/user"
-SERVICE_NAME="mpris-scrobbler.service"
+SERVICE_NAME="scrbblr.service"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -183,4 +183,4 @@ info "  Stop service:   systemctl --user stop $SERVICE_NAME"
 info "  Restart:        systemctl --user restart $SERVICE_NAME"
 info "  Generate report: $BIN_NAME report --html --output ~/music-report"
 info "  Publish report:  $PUBLISH_INSTALLED_NAME"
-info "  Configure defaults in: ~/.config/mpris-scrobbler/publish.conf"
+info "  Configure defaults in: ~/.config/scrbblr/publish.conf"

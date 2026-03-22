@@ -1,4 +1,4 @@
-# mpris-scrobbler
+# scrbblr
 
 A local music scrobbler for MPRIS-compatible players, built in Rust. It tracks what you listen to via `playerctl`, stores scrobble data in a local SQLite database, and generates listening reports.
 
@@ -42,13 +42,13 @@ Build and install the binary into `~/.local/bin`:
 
 ```bash
 cargo build --release
-install -Dm755 target/release/mpris-scrobbler ~/.local/bin/mpris-scrobbler
+install -Dm755 target/release/scrbblr ~/.local/bin/scrbblr
 ```
 
 Make sure `~/.local/bin` is in your `PATH`:
 
 ```bash
-command -v mpris-scrobbler
+command -v scrbblr
 ```
 
 If that prints nothing, add this to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.):
@@ -60,7 +60,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Then open a new shell and verify:
 
 ```bash
-mpris-scrobbler --help
+scrbblr --help
 ```
 
 ## Autostart (recommended)
@@ -73,7 +73,7 @@ Copy the provided unit file from the repo:
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp contrib/systemd/user/mpris-scrobbler.service ~/.config/systemd/user/
+cp contrib/systemd/user/scrbblr.service ~/.config/systemd/user/
 ```
 
 If needed, edit the player in the service (`--player com.blitzfc.qbz`).
@@ -82,14 +82,14 @@ If needed, edit the player in the service (`--player com.blitzfc.qbz`).
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now mpris-scrobbler.service
+systemctl --user enable --now scrbblr.service
 ```
 
 ### 3) Verify
 
 ```bash
-systemctl --user status mpris-scrobbler.service
-journalctl --user -u mpris-scrobbler.service -f
+systemctl --user status scrbblr.service
+journalctl --user -u scrbblr.service -f
 ```
 
 ### Optional: keep running without active login
@@ -112,7 +112,7 @@ Recommended workflow:
 - Generate HTML reports manually whenever you want:
 
 ```bash
-mpris-scrobbler report --html --output ~/music-report
+scrbblr report --html --output ~/music-report
 ```
 
 This creates a self-contained directory:
@@ -134,7 +134,7 @@ When `--html` is used, the tool automatically runs enrichment first (for missing
 cargo build --release
 ```
 
-The binary will be at `target/release/mpris-scrobbler`.
+The binary will be at `target/release/scrbblr`.
 
 ## Usage
 
@@ -144,16 +144,16 @@ Start the watcher to begin recording what you listen to:
 
 ```bash
 # Default player (com.blitzfc.qbz)
-mpris-scrobbler watch
+scrbblr watch
 
 # Specify a different player
-mpris-scrobbler watch --player spotify
+scrbblr watch --player spotify
 ```
 
 The watcher runs in the foreground and logs scrobbles to stderr:
 
 ```
-Database: /home/user/.local/share/mpris-scrobbler/scrobbles.db
+Database: /home/user/.local/share/scrbblr/scrobbles.db
 Watching player: com.blitzfc.qbz
 [scrobbled] ††† (Crosses) - This Is a Trick (186s)
 [scrobbled] ††† (Crosses) - Telepathy (200s)
@@ -179,25 +179,25 @@ The HTML head loads JetBrains Mono from Google Fonts and falls back to local mon
 
 ```bash
 # All-time summary with top artists, albums, genres, tracks
-mpris-scrobbler report
+scrbblr report
 
 # Filter by period
-mpris-scrobbler report --period today
-mpris-scrobbler report --period week
-mpris-scrobbler report --period month
-mpris-scrobbler report --period year
+scrbblr report --period today
+scrbblr report --period week
+scrbblr report --period month
+scrbblr report --period year
 
 # JSON output
-mpris-scrobbler report --json
+scrbblr report --json
 
 # HTML output to stdout (no covers)
-mpris-scrobbler report --html
+scrbblr report --html
 
 # HTML output to directory (with covers)
-mpris-scrobbler report --html --output ~/music-report
+scrbblr report --html --output ~/music-report
 
 # Change the number of entries in top-N lists (default: 20)
-mpris-scrobbler report --limit 20
+scrbblr report --limit 20
 ```
 
 Example terminal output:
@@ -227,11 +227,11 @@ Top Artists
 ### Options
 
 ```
-mpris-scrobbler watch [OPTIONS]
+scrbblr watch [OPTIONS]
     --player <NAME>      Player name for playerctl [default: com.blitzfc.qbz]
     --db-path <PATH>     Path to the SQLite database
 
-mpris-scrobbler report [OPTIONS]
+scrbblr report [OPTIONS]
     --period <PERIOD>    today, week, month, year, all [default: all]
     --json               Output as JSON
     --html               Output as standalone HTML
@@ -240,11 +240,11 @@ mpris-scrobbler report [OPTIONS]
     --all-time-limit <N> Override all-time top-N limit [default: 2.5x --limit]
     --db-path <PATH>     Path to the SQLite database
 
-mpris-scrobbler enrich [OPTIONS]
+scrbblr enrich [OPTIONS]
     --force              Re-fetch metadata for all albums
     --db-path <PATH>     Path to the SQLite database
 
-mpris-scrobbler last-scrobble [OPTIONS]
+scrbblr last-scrobble [OPTIONS]
     --db-path <PATH>     Path to the SQLite database
 ```
 
@@ -253,7 +253,7 @@ mpris-scrobbler last-scrobble [OPTIONS]
 Enrichment is automatic for `report --html`, but you can still run it manually if you want to prefetch metadata:
 
 ```bash
-mpris-scrobbler enrich
+scrbblr enrich
 ```
 
 When MusicBrainz matching is tricky, enrichment now retries with normalised
@@ -275,7 +275,7 @@ re-tried after 7 days, not on every report run.
 Use force mode when you want immediate backfill/refresh for everything:
 
 ```bash
-mpris-scrobbler enrich --force
+scrbblr enrich --force
 ```
 
 Genre normalisation notes:
@@ -289,7 +289,7 @@ Genre normalisation notes:
 
 Downloaded covers are stored in:
 
-`~/.local/share/mpris-scrobbler/covers/`
+`~/.local/share/scrbblr/covers/`
 
 #### Manually pinning an album (`pin-album`)
 
@@ -311,7 +311,7 @@ When that happens you can pin the correct MusicBrainz release manually:
    `[N/M] Artist - Album` line) and run:
 
 ```bash
-mpris-scrobbler pin-album \
+scrbblr pin-album \
   --artist "Coro della Radiotelevisione Svizzera" \
   --album  "Vivaldi: Gloria; Nisi Dominus; Nulla in mundo pax" \
   --mbid   "f2ff907a-0355-451b-9c68-f0b7c09bb145"
@@ -325,7 +325,7 @@ If the Cover Art Archive has no image for the release (the command prints
 "No cover art available"), supply one with `--cover-url`:
 
 ```bash
-mpris-scrobbler pin-album \
+scrbblr pin-album \
   --artist    "Coro della Radiotelevisione Svizzera" \
   --album     "Vivaldi: Gloria; Nisi Dominus; Nulla in mundo pax" \
   --mbid      "f2ff907a-0355-451b-9c68-f0b7c09bb145" \
@@ -341,17 +341,17 @@ Bandcamp, etc.
 If you publish the report to a remote host, use the included helper script:
 
 ```bash
-./mpris-scrobbler-publish.sh
+./scrbblr-publish.sh
 ```
 
 It runs `report --html` and `rsync` only when a newer scrobble exists.
 The script tracks the last published scrobble timestamp in:
 
-`$XDG_STATE_HOME/mpris-scrobbler/last-published-scrobble.txt`
+`$XDG_STATE_HOME/scrbblr/last-published-scrobble.txt`
 
 Set defaults in a config file so you can run the script without passing flags:
 
-`~/.config/mpris-scrobbler/publish.conf`
+`~/.config/scrbblr/publish.conf`
 
 If you use `./install.sh`, an example config is installed there automatically
 when the file does not already exist.
@@ -366,31 +366,31 @@ DB_PATH=""
 
 Legacy fallback is also supported:
 
-`~/.mpris-scrobbler-publish.conf`
+`~/.scrbblr-publish.conf`
 
 Flags:
 
 ```bash
-./mpris-scrobbler-publish.sh --output ~/music-report --remote user@host:/var/www/music-report
-./mpris-scrobbler-publish.sh --db-path /custom/path/scrobbles.db
+./scrbblr-publish.sh --output ~/music-report --remote user@host:/var/www/music-report
+./scrbblr-publish.sh --db-path /custom/path/scrobbles.db
 
 # Keep running and check every 5 minutes (default interval):
-./mpris-scrobbler-publish.sh --watch
+./scrbblr-publish.sh --watch
 
 # Custom interval (seconds):
-./mpris-scrobbler-publish.sh --watch --interval 600
+./scrbblr-publish.sh --watch --interval 600
 
 # Force regeneration even when no new scrobbles exist:
-./mpris-scrobbler-publish.sh --force
+./scrbblr-publish.sh --force
 ```
 
 The installer also places this helper in `~/.local/bin` as:
 
-`mpris-scrobbler-publish`
+`scrbblr-publish`
 
 ## Data storage
 
-Scrobbles are stored in SQLite at `~/.local/share/mpris-scrobbler/scrobbles.db` (respects `$XDG_DATA_HOME`).
+Scrobbles are stored in SQLite at `~/.local/share/scrbblr/scrobbles.db` (respects `$XDG_DATA_HOME`).
 
 Each scrobble records:
 
@@ -422,11 +422,11 @@ Check the player name:
 playerctl -l
 ```
 
-If needed, edit `~/.config/systemd/user/mpris-scrobbler.service` and change `--player ...`, then reload/restart:
+If needed, edit `~/.config/systemd/user/scrbblr.service` and change `--player ...`, then reload/restart:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user restart mpris-scrobbler.service
+systemctl --user restart scrbblr.service
 ```
 
 ### Player is in another account/session
@@ -436,14 +436,14 @@ MPRIS is session-scoped. The service must run in the same account/session as the
 ### Check logs
 
 ```bash
-journalctl --user -u mpris-scrobbler.service -n 200
-journalctl --user -u mpris-scrobbler.service -f
+journalctl --user -u scrbblr.service -n 200
+journalctl --user -u scrbblr.service -f
 ```
 
 ### Verify database is being written
 
 ```bash
-mpris-scrobbler report --period today
+scrbblr report --period today
 ```
 
 ## Licence

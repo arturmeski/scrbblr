@@ -41,7 +41,7 @@
 //! ## User-Agent
 //!
 //! MusicBrainz requires a descriptive User-Agent header. We use:
-//!   `mpris-scrobbler/0.1.0 (https://github.com/arturmeski/mpris_scrobbler)`
+//!   `scrbblr/0.1.0 (https://github.com/arturmeski/scrbblr)`
 
 use crate::db::{self, AlbumCacheEntry};
 use image::codecs::jpeg::JpegEncoder;
@@ -57,7 +57,7 @@ use std::time::Duration;
 /// User-Agent string sent with all HTTP requests to MusicBrainz.
 /// Required by MusicBrainz API policy:
 /// https://musicbrainz.org/doc/MusicBrainz_API/Rate_Limiting
-const USER_AGENT: &str = "mpris-scrobbler/0.1.0 (https://github.com/arturmeski/mpris_scrobbler)";
+const USER_AGENT: &str = "scrbblr/0.1.0 (https://github.com/arturmeski/scrbblr)";
 
 /// Build the shared HTTP client used for all MusicBrainz and Cover Art Archive requests.
 fn build_client() -> Client {
@@ -188,14 +188,14 @@ struct MbTag {
 
 /// Get the directory where cover art images are stored, creating it if needed.
 ///
-/// Default: `~/.local/share/mpris-scrobbler/covers/`
+/// Default: `~/.local/share/scrbblr/covers/`
 /// (respects `$XDG_DATA_HOME`)
 pub fn covers_dir() -> PathBuf {
     let data_dir = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
         let home = std::env::var("HOME").expect("HOME not set");
         format!("{}/.local/share", home)
     });
-    let dir = PathBuf::from(format!("{}/mpris-scrobbler/covers", data_dir));
+    let dir = PathBuf::from(format!("{}/scrbblr/covers", data_dir));
     fs::create_dir_all(&dir).expect("Failed to create covers directory");
     dir
 }

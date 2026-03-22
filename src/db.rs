@@ -1,8 +1,8 @@
-//! Database module for the MPRIS scrobbler.
+//! Database module for scrbblr.
 //!
 //! This module handles all SQLite interactions: schema creation, inserting
 //! scrobble records, and querying data for reports. The database is stored
-//! as a single SQLite file (by default at `~/.local/share/mpris-scrobbler/scrobbles.db`).
+//! as a single SQLite file (by default at `~/.local/share/scrbblr/scrobbles.db`).
 //!
 //! ## Tables
 //!

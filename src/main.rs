@@ -1,4 +1,4 @@
-//! MPRIS + MPD Scrobbler — a local music scrobbler for Linux.
+//! scrbblr — a local music scrobbler for MPRIS and MPD on Linux.
 //!
 //! This is the CLI entry point. It provides five subcommands:
 //!
@@ -69,7 +69,7 @@ const DEFAULT_PLAYER: &str = "com.blitzfc.qbz";
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "mpris-scrobbler", about = "MPRIS scrobbler using playerctl")]
+#[command(name = "scrbblr", about = "Local music scrobbler for MPRIS and MPD")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -110,7 +110,7 @@ enum Commands {
         mpd_port: u16,
 
         /// Path to the SQLite database file. If not specified, defaults to
-        /// ~/.local/share/mpris-scrobbler/scrobbles.db (respects $XDG_DATA_HOME).
+        /// ~/.local/share/scrbblr/scrobbles.db (respects $XDG_DATA_HOME).
         #[arg(long)]
         db_path: Option<String>,
     },
@@ -228,8 +228,8 @@ enum Commands {
 
 /// Determine the default database path, following the XDG Base Directory spec.
 ///
-/// Path: $XDG_DATA_HOME/mpris-scrobbler/scrobbles.db
-/// Falls back to: ~/.local/share/mpris-scrobbler/scrobbles.db
+/// Path: $XDG_DATA_HOME/scrbblr/scrobbles.db
+/// Falls back to: ~/.local/share/scrbblr/scrobbles.db
 ///
 /// Creates the parent directory if it doesn't exist.
 fn default_db_path() -> String {
@@ -237,7 +237,7 @@ fn default_db_path() -> String {
         let home = std::env::var("HOME").expect("HOME not set");
         format!("{}/.local/share", home)
     });
-    let dir = format!("{}/mpris-scrobbler", data_dir);
+    let dir = format!("{}/scrbblr", data_dir);
     std::fs::create_dir_all(&dir).expect("Failed to create data directory");
     format!("{}/scrobbles.db", dir)
 }

@@ -1,5 +1,5 @@
 [package]
-name = "mpris-scrobbler"
+name = "scrbblr"
 version = "0.1.0"
 edition = "2024"
 
