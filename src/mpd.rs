@@ -909,10 +909,7 @@ fn try_extract_cover(
     let cover_path = dest.to_string_lossy().to_string();
     let locked = db_conn.lock().unwrap();
     if db::set_local_cover(&locked, &state.artist, &state.album, &cover_path).is_ok() {
-        eprintln!(
-            "[mpd] Cover cached for {} — {}",
-            state.artist, state.album
-        );
+        eprintln!("[mpd] Cover cached for {} — {}", state.artist, state.album);
     }
 }
 
@@ -1103,6 +1100,26 @@ fn run_mpd_cover_enrich_albums(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn state(
+        file: &str,
+        artist: &str,
+        album: &str,
+        title: &str,
+        duration_secs: u64,
+        state: &str,
+    ) -> MpdPlayerState {
+        MpdPlayerState {
+            file: file.to_string(),
+            artist: artist.to_string(),
+            album: album.to_string(),
+            title: title.to_string(),
+            duration_secs: Some(duration_secs),
+            state: state.to_string(),
+        }
+    }
 
     // -----------------------------------------------------------------------
     // album_cover_stem — filename generation
@@ -1196,6 +1213,123 @@ mod tests {
         // Anything unrecognised maps to Stopped.
         assert_eq!(parse_mpd_state(""), PlayerStatus::Stopped);
         assert_eq!(parse_mpd_state("unknown"), PlayerStatus::Stopped);
+    }
+
+    // -----------------------------------------------------------------------
+    // dispatch_events
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dispatch_events_pause_resume_same_file_keeps_metadata_marker() {
+        let scrobbled: Rc<RefCell<Vec<db::NewScrobble>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = scrobbled.clone();
+        let mut tracker = watcher::ScrobbleTracker::new(
+            move |s: db::NewScrobble| {
+                sink.borrow_mut().push(s);
+            },
+            "MPD".to_string(),
+        );
+
+        let mut last_metadata_file: Option<String> = None;
+
+        let mut prev = MpdPlayerState::default();
+        let play_a = state(
+            "a.flac",
+            "Deftones",
+            "White Pony",
+            "Digital Bath",
+            291,
+            "play",
+        );
+        dispatch_events(&prev, &play_a, &mut tracker, &mut last_metadata_file);
+        assert_eq!(last_metadata_file.as_deref(), Some("a.flac"));
+
+        let pause_a = state(
+            "a.flac",
+            "Deftones",
+            "White Pony",
+            "Digital Bath",
+            291,
+            "pause",
+        );
+        dispatch_events(&play_a, &pause_a, &mut tracker, &mut last_metadata_file);
+        assert_eq!(last_metadata_file.as_deref(), Some("a.flac"));
+
+        prev = pause_a;
+        let resume_a = state(
+            "a.flac",
+            "Deftones",
+            "White Pony",
+            "Digital Bath",
+            291,
+            "play",
+        );
+        dispatch_events(&prev, &resume_a, &mut tracker, &mut last_metadata_file);
+        assert_eq!(last_metadata_file.as_deref(), Some("a.flac"));
+
+        // No track boundary occurred; therefore no scrobble should have been emitted.
+        assert!(scrobbled.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_dispatch_events_stop_clears_metadata_marker() {
+        let scrobbled: Rc<RefCell<Vec<db::NewScrobble>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = scrobbled.clone();
+        let mut tracker = watcher::ScrobbleTracker::new(
+            move |s: db::NewScrobble| {
+                sink.borrow_mut().push(s);
+            },
+            "MPD".to_string(),
+        );
+
+        let mut last_metadata_file: Option<String> = None;
+        let prev = MpdPlayerState::default();
+        let play_a = state("a.flac", "A", "Alb", "Song A", 200, "play");
+        dispatch_events(&prev, &play_a, &mut tracker, &mut last_metadata_file);
+        assert_eq!(last_metadata_file.as_deref(), Some("a.flac"));
+
+        let stop_a = state("a.flac", "A", "Alb", "Song A", 200, "stop");
+        dispatch_events(&play_a, &stop_a, &mut tracker, &mut last_metadata_file);
+        assert_eq!(last_metadata_file, None);
+    }
+
+    #[test]
+    fn test_dispatch_events_replay_same_file_after_stop_reinitialises_track() {
+        let scrobbled: Rc<RefCell<Vec<db::NewScrobble>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = scrobbled.clone();
+        let mut tracker = watcher::ScrobbleTracker::new(
+            move |s: db::NewScrobble| {
+                sink.borrow_mut().push(s);
+            },
+            "MPD".to_string(),
+        );
+
+        let mut last_metadata_file: Option<String> = None;
+        let prev = MpdPlayerState::default();
+
+        // Use 0-second duration so threshold is 0 and each Stop scrobbles
+        // immediately if the tracker is tracking an active track.
+        let play_a = state("a.flac", "A", "Alb", "Song A", 0, "play");
+        dispatch_events(&prev, &play_a, &mut tracker, &mut last_metadata_file);
+
+        let stop_a = state("a.flac", "A", "Alb", "Song A", 0, "stop");
+        dispatch_events(&play_a, &stop_a, &mut tracker, &mut last_metadata_file);
+        assert_eq!(scrobbled.borrow().len(), 1);
+        assert_eq!(last_metadata_file, None);
+
+        // Replay the same file. Because Stop cleared last_metadata_file,
+        // dispatch_events must emit Metadata again and reinitialise tracking.
+        let replay_a = state("a.flac", "A", "Alb", "Song A", 0, "play");
+        dispatch_events(&stop_a, &replay_a, &mut tracker, &mut last_metadata_file);
+        let stop_again = state("a.flac", "A", "Alb", "Song A", 0, "stop");
+        dispatch_events(
+            &replay_a,
+            &stop_again,
+            &mut tracker,
+            &mut last_metadata_file,
+        );
+
+        assert_eq!(scrobbled.borrow().len(), 2);
     }
 
     // -----------------------------------------------------------------------

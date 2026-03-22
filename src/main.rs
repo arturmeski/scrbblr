@@ -703,7 +703,17 @@ fn main() {
                 host: mpd_host,
                 port: mpd_port,
             };
-            run_report(&period, json, html, output.as_deref(), limit, atl, no_enrich, &mpd_cfg, &path);
+            run_report(
+                &period,
+                json,
+                html,
+                output.as_deref(),
+                limit,
+                atl,
+                no_enrich,
+                &mpd_cfg,
+                &path,
+            );
         }
         Commands::Enrich {
             online,
@@ -717,8 +727,12 @@ fn main() {
         } => {
             if no_mpd_covers && !online {
                 eprintln!("Nothing to do. Pass --online and/or omit --no-mpd-covers.");
-                eprintln!("  (default)      Extract embedded covers from music files via MPD (offline)");
-                eprintln!("  --online       Fetch metadata and covers from MusicBrainz / iTunes / CAA");
+                eprintln!(
+                    "  (default)      Extract embedded covers from music files via MPD (offline)"
+                );
+                eprintln!(
+                    "  --online       Fetch metadata and covers from MusicBrainz / iTunes / CAA"
+                );
                 std::process::exit(0);
             }
 

@@ -601,12 +601,7 @@ pub fn print_terminal_report(data: &ReportData) {
                 ]
             })
             .collect();
-        print_box_table(
-            &["Source", "Scrobbles", "Time"],
-            &rows,
-            None,
-            &[0],
-        );
+        print_box_table(&["Source", "Scrobbles", "Time"], &rows, None, &[0]);
     }
 
     // --- Top Artists ---
@@ -927,14 +922,13 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                 .map(|(i, s)| {
                     // Prefix the source name with a colour dot matching the
                     // palette slot assigned to it in the all-time ranking.
-                    let label = if let Some((bg, _)) =
-                        source_colours(&s.source, &ordered_sources)
-                    {
+                    let label = if let Some((bg, _)) = source_colours(&s.source, &ordered_sources) {
                         format!(
                             "<span style=\"display:inline-block;width:9px;height:9px;\
                              border-radius:50%;background:{};margin-right:5px;\
                              vertical-align:middle\"></span>{}",
-                            bg, html_escape(&s.source)
+                            bg,
+                            html_escape(&s.source)
                         )
                     } else {
                         html_escape(&s.source)
@@ -986,10 +980,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .as_deref()
                     .and_then(|src| source_colours(src, &ordered_sources))
                     .map(|(bg, border)| {
-                        format!(
-                            " style=\"background:{};border-color:{}\"",
-                            bg, border
-                        )
+                        format!(" style=\"background:{};border-color:{}\"", bg, border)
                     })
                     .unwrap_or_default();
                 h.linef(format_args!("<article class=\"album\"{}>", card_style));
@@ -1080,11 +1071,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     html_escape(&a.album)
                 };
                 BarRow {
-                    cells: vec![
-                        (i + 1).to_string(),
-                        html_escape(&a.artist),
-                        album_cell,
-                    ],
+                    cells: vec![(i + 1).to_string(), html_escape(&a.artist), album_cell],
                     value: a.plays,
                     suffix: format_duration(a.listen_time_secs),
                     cover,
@@ -1373,10 +1360,7 @@ const SOURCE_PALETTE: &[(&str, &str)] = &[
 
 /// Look up the card background and border colours for a source name, given
 /// the ordered list of all-time sources (most played first).
-fn source_colours<'a>(
-    source: &str,
-    ordered_sources: &[String],
-) -> Option<(&'a str, &'a str)> {
+fn source_colours<'a>(source: &str, ordered_sources: &[String]) -> Option<(&'a str, &'a str)> {
     ordered_sources
         .iter()
         .position(|s| s == source)
@@ -1549,7 +1533,10 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
     let play_count_idx = headers.len().saturating_sub(2);
     for (i, hdr) in headers.iter().enumerate() {
         if i == play_count_idx {
-            h.linef(format_args!("<th class=\"play-count\">{}</th>", html_escape(hdr)));
+            h.linef(format_args!(
+                "<th class=\"play-count\">{}</th>",
+                html_escape(hdr)
+            ));
         } else {
             h.linef(format_args!("<th>{}</th>", html_escape(hdr)));
         }

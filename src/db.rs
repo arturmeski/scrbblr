@@ -205,11 +205,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
     )?;
     // Add the source column to existing databases. SQLite returns an error if
     // the column already exists, which we silently ignore for idempotency.
-    conn.execute(
-        "ALTER TABLE scrobbles ADD COLUMN source TEXT",
-        [],
-    ).ok();
-    conn.execute_batch("
+    conn.execute("ALTER TABLE scrobbles ADD COLUMN source TEXT", [])
+        .ok();
+    conn.execute_batch(
+        "
         -- Cache table for album metadata (cover art, genres) from MusicBrainz.
         -- Populated by the 'enrich' command or automatically when generating
         -- HTML reports. Rows with cover_url = NULL are re-tried on next run.
@@ -1124,7 +1123,7 @@ mod tests {
             track_duration_secs: Some(186),
             played_duration_secs: 186,
             scrobbled_at: today_at("10:00:00"),
-                source: "test".into(),
+            source: "test".into(),
         };
         // First insert should get row ID 1.
         let id = insert_scrobble(&conn, &s).unwrap();
@@ -1502,7 +1501,7 @@ mod tests {
             track_duration_secs: None,
             played_duration_secs: 240,
             scrobbled_at: today_at("12:00:00"),
-                source: "test".into(),
+            source: "test".into(),
         };
         insert_scrobble(&conn, &s).unwrap();
         let recent = recent_scrobbles(&conn, "all", 1).unwrap();

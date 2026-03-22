@@ -128,6 +128,7 @@ impl CurrentTrack {
 pub struct ScrobbleTracker<F: FnMut(NewScrobble)> {
     current_track: Option<CurrentTrack>,
     is_playing: bool,
+    has_seen_status: bool,
     playing_since: Option<Instant>,
     accumulated_secs: f64,
     scrobble_fn: F,
@@ -140,6 +141,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
         Self {
             current_track: None,
             is_playing: false,
+            has_seen_status: false,
             playing_since: None,
             accumulated_secs: 0.0,
             scrobble_fn,
@@ -151,9 +153,10 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
     ///
     /// ## Event handling:
     ///
-    /// - **Metadata**: A new track started. Evaluate the previous track
-    ///   (scrobble if threshold met), then begin tracking the new one.
-    ///   We assume the new track starts in Playing state.
+    /// - **Metadata**: A track boundary or metadata refresh. If metadata
+    ///   points to a different track, evaluate the previous one (scrobble if
+    ///   threshold met), then begin tracking the new one. If metadata refers
+    ///   to the same track, update fields in place and keep timing state.
     ///
     /// - **Status(Playing)**: Resume accumulating play time. If already
     ///   playing, this is a no-op (avoids double-counting).
@@ -178,6 +181,20 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                 title,
                 duration_us,
             } => {
+                // Some players emit metadata updates for the same track (for
+                // example around pause/resume or delayed tag updates). Treat
+                // those as in-place updates, not as a track boundary.
+                if let Some(current) = &mut self.current_track
+                    && current.artist == artist
+                    && current.album == album
+                    && current.title == title
+                {
+                    if duration_us.is_some() {
+                        current.duration_us = duration_us;
+                    }
+                    return;
+                }
+
                 // Evaluate the previous track before switching to the new one.
                 self.evaluate_previous_track();
 
@@ -190,12 +207,23 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                 });
                 self.accumulated_secs = 0.0;
 
-                // A metadata event means the player is actively playing the new track.
-                self.is_playing = true;
-                self.playing_since = Some(Instant::now());
+                // Do not blindly assume metadata implies Playing. If we've
+                // never seen status yet, fall back to assuming playback has
+                // started so startup still works when metadata arrives first.
+                if self.has_seen_status {
+                    self.playing_since = if self.is_playing {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+                } else {
+                    self.is_playing = true;
+                    self.playing_since = Some(Instant::now());
+                }
             }
             Event::Status(status) => match status {
                 PlayerStatus::Playing => {
+                    self.has_seen_status = true;
                     // Only start the clock if we weren't already playing.
                     // This prevents double-counting if we receive redundant Playing events.
                     if !self.is_playing {
@@ -204,6 +232,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                     }
                 }
                 PlayerStatus::Paused => {
+                    self.has_seen_status = true;
                     // Flush the elapsed time from the current playing stretch
                     // into the accumulator, then stop the clock.
                     self.flush_playing_time();
@@ -211,6 +240,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                     self.playing_since = None;
                 }
                 PlayerStatus::Stopped => {
+                    self.has_seen_status = true;
                     // Treat Stop as a final decision: evaluate the current
                     // track now (scrobble if threshold met, discard if not)
                     // and clear all tracking state. This prevents a spurious
@@ -219,6 +249,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                     self.evaluate_previous_track();
                     self.accumulated_secs = 0.0;
                     self.is_playing = false;
+                    self.playing_since = None;
                 }
             },
             Event::Eof => {
@@ -380,20 +411,26 @@ pub fn create_db_tracker(
     conn: std::sync::Arc<std::sync::Mutex<Connection>>,
     source: String,
 ) -> ScrobbleTracker<impl FnMut(NewScrobble)> {
-    ScrobbleTracker::new(move |scrobble: NewScrobble| {
-        let conn = conn.lock().unwrap();
-        match db::insert_scrobble(&conn, &scrobble) {
-            Ok(_) => {
-                eprintln!(
-                    "[scrobbled] {}: {} - {} ({}s)",
-                    scrobble.source, scrobble.artist, scrobble.title, scrobble.played_duration_secs
-                );
+    ScrobbleTracker::new(
+        move |scrobble: NewScrobble| {
+            let conn = conn.lock().unwrap();
+            match db::insert_scrobble(&conn, &scrobble) {
+                Ok(_) => {
+                    eprintln!(
+                        "[scrobbled] {}: {} - {} ({}s)",
+                        scrobble.source,
+                        scrobble.artist,
+                        scrobble.title,
+                        scrobble.played_duration_secs
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[error] Failed to insert scrobble: {}", e);
+                }
             }
-            Err(e) => {
-                eprintln!("[error] Failed to insert scrobble: {}", e);
-            }
-        }
-    }, source)
+        },
+        source,
+    )
 }
 
 // ===========================================================================
@@ -410,6 +447,7 @@ pub fn create_db_tracker(
 pub struct TestableTracker {
     current_track: Option<CurrentTrack>,
     is_playing: bool,
+    has_seen_status: bool,
     /// Simulated timestamp (in seconds) when the current Playing stretch began.
     playing_since_secs: Option<f64>,
     /// Accumulated play time for the current track (in seconds).
@@ -428,6 +466,7 @@ impl TestableTracker {
         Self {
             current_track: None,
             is_playing: false,
+            has_seen_status: false,
             playing_since_secs: None,
             accumulated_secs: 0.0,
             scrobbled: Vec::new(),
@@ -484,6 +523,17 @@ impl TestableTracker {
                 title,
                 duration_us,
             } => {
+                if let Some(current) = &mut self.current_track
+                    && current.artist == artist
+                    && current.album == album
+                    && current.title == title
+                {
+                    if duration_us.is_some() {
+                        current.duration_us = duration_us;
+                    }
+                    return;
+                }
+
                 self.evaluate_previous_track();
                 self.current_track = Some(CurrentTrack {
                     artist,
@@ -492,25 +542,37 @@ impl TestableTracker {
                     duration_us,
                 });
                 self.accumulated_secs = 0.0;
-                self.is_playing = true;
-                self.playing_since_secs = Some(self.clock_secs);
+                if self.has_seen_status {
+                    self.playing_since_secs = if self.is_playing {
+                        Some(self.clock_secs)
+                    } else {
+                        None
+                    };
+                } else {
+                    self.is_playing = true;
+                    self.playing_since_secs = Some(self.clock_secs);
+                }
             }
             Event::Status(status) => match status {
                 PlayerStatus::Playing => {
+                    self.has_seen_status = true;
                     if !self.is_playing {
                         self.is_playing = true;
                         self.playing_since_secs = Some(self.clock_secs);
                     }
                 }
                 PlayerStatus::Paused => {
+                    self.has_seen_status = true;
                     self.flush_playing_time();
                     self.is_playing = false;
                     self.playing_since_secs = None;
                 }
                 PlayerStatus::Stopped => {
+                    self.has_seen_status = true;
                     self.evaluate_previous_track();
                     self.accumulated_secs = 0.0;
                     self.is_playing = false;
+                    self.playing_since_secs = None;
                 }
             },
             Event::Eof => {
@@ -874,6 +936,82 @@ mod tests {
         assert_eq!(tracker.scrobbled.len(), 2);
         assert_eq!(tracker.scrobbled[0].title, "This Is a Trick");
         assert_eq!(tracker.scrobbled[1].title, "Digital Bath");
+    }
+
+    #[test]
+    fn test_duplicate_metadata_same_track_does_not_double_scrobble() {
+        // Some players emit duplicate metadata lines for the same track.
+        // They must not split a single listen into multiple scrobbles.
+        let mut tracker = TestableTracker::new();
+
+        tracker.handle_event(Event::Metadata {
+            artist: "††† (Crosses)".into(),
+            album: "††† (Crosses)".into(),
+            title: "This Is a Trick".into(),
+            duration_us: Some(186_000_000), // threshold = 93s
+        });
+        tracker.advance_time(50.0);
+
+        // Duplicate metadata for the same track should be ignored as a boundary.
+        tracker.handle_event(Event::Metadata {
+            artist: "††† (Crosses)".into(),
+            album: "††† (Crosses)".into(),
+            title: "This Is a Trick".into(),
+            duration_us: Some(186_000_000),
+        });
+        tracker.advance_time(50.0);
+
+        // Next track triggers evaluation.
+        tracker.handle_event(Event::Metadata {
+            artist: "Deftones".into(),
+            album: "White Pony".into(),
+            title: "Digital Bath".into(),
+            duration_us: Some(291_000_000),
+        });
+
+        assert_eq!(tracker.scrobbled.len(), 1);
+        assert_eq!(tracker.scrobbled[0].title, "This Is a Trick");
+        assert_eq!(tracker.scrobbled[0].played_duration_secs, 100);
+    }
+
+    #[test]
+    fn test_metadata_while_paused_does_not_start_clock() {
+        // If metadata arrives while paused, we should not treat it as playing.
+        let mut tracker = TestableTracker::new();
+
+        tracker.handle_event(Event::Metadata {
+            artist: "††† (Crosses)".into(),
+            album: "††† (Crosses)".into(),
+            title: "Telepathy".into(),
+            duration_us: Some(215_000_000), // threshold = 107.5s
+        });
+
+        tracker.advance_time(30.0);
+        tracker.handle_event(Event::Status(PlayerStatus::Paused));
+
+        // Metadata update while paused (same track, perhaps with better tags).
+        tracker.handle_event(Event::Metadata {
+            artist: "††† (Crosses)".into(),
+            album: "††† (Crosses)".into(),
+            title: "Telepathy".into(),
+            duration_us: Some(215_000_000),
+        });
+
+        // Long paused stretch should not count.
+        tracker.advance_time(500.0);
+
+        // Resume and play a bit more, still below threshold overall.
+        tracker.handle_event(Event::Status(PlayerStatus::Playing));
+        tracker.advance_time(30.0);
+
+        tracker.handle_event(Event::Metadata {
+            artist: "Deftones".into(),
+            album: "White Pony".into(),
+            title: "Digital Bath".into(),
+            duration_us: Some(291_000_000),
+        });
+
+        assert_eq!(tracker.scrobbled.len(), 0);
     }
 
     #[test]

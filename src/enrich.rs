@@ -927,7 +927,12 @@ pub fn run_enrich(conn: &Connection, force: bool, quiet: bool, no_itunes: bool) 
 }
 
 /// Inner enrichment loop shared by `run_enrich` and `run_enrich_targeted`.
-fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: bool, no_itunes: bool) {
+fn run_enrich_albums(
+    conn: &Connection,
+    albums: Vec<db::UncachedAlbum>,
+    quiet: bool,
+    no_itunes: bool,
+) {
     if albums.is_empty() {
         if !quiet {
             eprintln!("All albums are already cached. Nothing to do.");
@@ -969,12 +974,11 @@ fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: b
                 None
             } else {
                 eprintln!("  Trying iTunes...");
-                fetch_itunes_cover_url(&client, &album.artist, &album.album)
-                    .and_then(|art_url| {
-                        let stem = itunes_cover_stem(&album.artist, &album.album);
-                        let dest = covers.join(format!("{}.jpg", stem));
-                        try_download(&client, &art_url, &dest)
-                    })
+                fetch_itunes_cover_url(&client, &album.artist, &album.album).and_then(|art_url| {
+                    let stem = itunes_cover_stem(&album.artist, &album.album);
+                    let dest = covers.join(format!("{}.jpg", stem));
+                    try_download(&client, &art_url, &dest)
+                })
             };
 
             if cover.is_some() {
@@ -1053,8 +1057,7 @@ fn run_enrich_albums(conn: &Connection, albums: Vec<db::UncachedAlbum>, quiet: b
                 );
                 for alt_mbid in &candidates[1..] {
                     thread::sleep(RATE_LIMIT_DELAY);
-                    let alt_url =
-                        format!("https://coverartarchive.org/release/{}/front", alt_mbid);
+                    let alt_url = format!("https://coverartarchive.org/release/{}/front", alt_mbid);
                     let dest = covers.join(format!("{}.jpg", primary_mbid));
                     if let Some(path) = try_download(&client, &alt_url, &dest) {
                         eprintln!("  Cover downloaded (from alternate release {}).", alt_mbid);
