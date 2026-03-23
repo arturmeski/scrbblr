@@ -311,10 +311,34 @@ fn read_exact_bytes(conn: &mut MpdConn, n: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Read the single `OK\n` line that terminates a binary chunk response.
-fn read_ok_line(conn: &mut MpdConn) {
-    let mut line = String::new();
-    let _ = conn.reader.read_line(&mut line);
+/// Consume the terminator after a binary chunk (`\nOK\n`).
+///
+/// MPD's binary responses place a newline byte immediately after the raw
+/// chunk payload, then an `OK` line. That means the first `read_line` after
+/// `read_exact(binary_len)` often returns an empty line, not `OK`.
+///
+/// Returns `Some(())` only when an `OK` line is observed; returns `None` on
+/// EOF, protocol errors, or I/O errors.
+fn read_chunk_terminator(conn: &mut MpdConn) -> Option<()> {
+    loop {
+        let mut line = String::new();
+        conn.reader.read_line(&mut line).ok()?;
+
+        let line = line.trim_end_matches('\n').trim_end_matches('\r');
+        if line.is_empty() {
+            // Expected: this is the newline that follows the raw binary bytes.
+            continue;
+        }
+        if line == "OK" {
+            return Some(());
+        }
+        if line.starts_with("ACK") {
+            return None;
+        }
+
+        // Any other non-empty line here means the stream got out of sync.
+        return None;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +482,7 @@ fn escape_mpd_string(s: &str) -> String {
 fn read_picture(conn: &mut MpdConn, file_uri: &str) -> Option<Vec<u8>> {
     let mut all_bytes: Vec<u8> = Vec::new();
     let mut offset: u64 = 0;
+    let mut expected_total: Option<u64> = None;
 
     loop {
         // Request the next chunk starting at `offset`.
@@ -466,6 +491,14 @@ fn read_picture(conn: &mut MpdConn, file_uri: &str) -> Option<Vec<u8>> {
 
         // Parse the `size`, `type`, and `binary` header fields.
         let (total_size, chunk_size) = read_picture_header(conn)?;
+
+        if total_size > 0 {
+            match expected_total {
+                None => expected_total = Some(total_size),
+                Some(prev) if prev != total_size => return None,
+                Some(_) => {}
+            }
+        }
 
         // `binary: 0` means no embedded picture (or we've read everything).
         if chunk_size == 0 {
@@ -479,7 +512,7 @@ fn read_picture(conn: &mut MpdConn, file_uri: &str) -> Option<Vec<u8>> {
         all_bytes.extend_from_slice(&chunk);
 
         // Each chunk response is terminated by a bare `OK` line.
-        read_ok_line(conn);
+        read_chunk_terminator(conn)?;
 
         offset += chunk_size;
 
@@ -487,6 +520,13 @@ fn read_picture(conn: &mut MpdConn, file_uri: &str) -> Option<Vec<u8>> {
         if total_size > 0 && offset >= total_size {
             break;
         }
+    }
+
+    // If MPD declared a total byte size, ensure we received all of it.
+    if let Some(total) = expected_total
+        && all_bytes.len() as u64 != total
+    {
+        return None;
     }
 
     if all_bytes.is_empty() {
@@ -1101,7 +1141,27 @@ fn run_mpd_cover_enrich_albums(
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::io::Cursor;
     use std::rc::Rc;
+
+    struct NullWriter;
+
+    impl Write for NullWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fake_conn(input: &[u8]) -> MpdConn {
+        MpdConn {
+            reader: BufReader::new(Box::new(Cursor::new(input.to_vec()))),
+            writer: Box::new(NullWriter),
+        }
+    }
 
     fn state(
         file: &str,
@@ -1213,6 +1273,32 @@ mod tests {
         // Anything unrecognised maps to Stopped.
         assert_eq!(parse_mpd_state(""), PlayerStatus::Stopped);
         assert_eq!(parse_mpd_state("unknown"), PlayerStatus::Stopped);
+    }
+
+    // -----------------------------------------------------------------------
+    // readpicture protocol handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_read_chunk_terminator_consumes_blank_then_ok() {
+        let mut conn = fake_conn(b"\nOK\n");
+        assert!(read_chunk_terminator(&mut conn).is_some());
+    }
+
+    #[test]
+    fn test_read_picture_reads_multiple_chunks_fully() {
+        // Two chunks: "hello" + " world!" = 12 bytes total.
+        let mut conn =
+            fake_conn(b"size: 12\nbinary: 5\nhello\nOK\nsize: 12\nbinary: 7\n world!\nOK\n");
+        let bytes = read_picture(&mut conn, "music/test.flac").unwrap();
+        assert_eq!(bytes, b"hello world!");
+    }
+
+    #[test]
+    fn test_read_picture_rejects_truncated_transfer() {
+        // MPD says total is 12, but only 5 bytes arrive before binary: 0.
+        let mut conn = fake_conn(b"size: 12\nbinary: 5\nhello\nOK\nsize: 12\nbinary: 0\nOK\n");
+        assert!(read_picture(&mut conn, "music/test.flac").is_none());
     }
 
     // -----------------------------------------------------------------------

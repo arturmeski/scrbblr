@@ -716,13 +716,14 @@ fn download_cover_with_fallback(
     mbid: &str,
     release_group_id: Option<&str>,
     covers_dir: &Path,
+    force_redownload: bool,
 ) -> Option<String> {
     // Use the MBID as the filename regardless of which endpoint succeeds,
     // so we have a consistent cache key.
     let dest = covers_dir.join(format!("{}.jpg", mbid));
 
-    // Skip download if we already have the file from a previous run.
-    if dest.exists() {
+    // Reuse cached file unless force mode explicitly asks for a refresh.
+    if should_reuse_existing_cover(dest.exists(), force_redownload) {
         return Some(dest.to_string_lossy().to_string());
     }
 
@@ -744,6 +745,11 @@ fn download_cover_with_fallback(
     }
 
     None
+}
+
+/// Decide whether an existing cover file should be reused as-is.
+fn should_reuse_existing_cover(dest_exists: bool, force_redownload: bool) -> bool {
+    dest_exists && !force_redownload
 }
 
 /// Decode image bytes, downscale if either dimension exceeds `MAX_COVER_DIM`,
@@ -794,6 +800,76 @@ fn itunes_cover_stem(artist: &str, album: &str) -> String {
     format!("itunes_{:016x}", hash)
 }
 
+/// Build a relaxed normalised key for fuzzy text matching.
+///
+/// Lowercases and keeps only alphanumeric characters and spaces, then
+/// collapses whitespace. This makes matching resilient to punctuation,
+/// symbols, and repeated spacing differences.
+fn normalise_match_key(s: &str) -> String {
+    let mapped: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    normalise_spaces(&mapped.to_ascii_lowercase())
+}
+
+/// Return true when two strings match exactly or one contains the other,
+/// after relaxed normalisation.
+fn loosely_matches(query: &str, candidate: &str) -> bool {
+    let q = normalise_match_key(query);
+    let c = normalise_match_key(candidate);
+    if q.is_empty() || c.is_empty() {
+        return false;
+    }
+    q == c || q.contains(&c) || c.contains(&q)
+}
+
+/// Score an iTunes result for the requested artist/album.
+///
+/// The score prefers exact artist/album matches, but still accepts useful
+/// near-matches (for example "The Division Bell - Single" for album field).
+fn score_itunes_result(result: &serde_json::Value, artist: &str, album: &str) -> Option<i32> {
+    let result_artist = result.get("artistName")?.as_str()?;
+    let result_album = result.get("collectionName")?.as_str()?;
+    let _ = result.get("artworkUrl100")?.as_str()?;
+
+    if !loosely_matches(artist, result_artist) || !loosely_matches(album, result_album) {
+        return None;
+    }
+
+    let artist_q = normalise_match_key(artist);
+    let artist_r = normalise_match_key(result_artist);
+    let album_q = normalise_match_key(album);
+    let album_r = normalise_match_key(result_album);
+
+    let artist_score = if artist_q == artist_r { 4 } else { 2 };
+    let album_score = if album_q == album_r { 4 } else { 2 };
+    Some(artist_score + album_score)
+}
+
+/// Pick the best-matching iTunes artwork URL for the requested artist/album.
+fn pick_best_itunes_cover_url(
+    results: &[serde_json::Value],
+    artist: &str,
+    album: &str,
+) -> Option<String> {
+    let best = results
+        .iter()
+        .filter_map(|r| score_itunes_result(r, artist, album).map(|score| (score, r)))
+        .max_by_key(|(score, _)| *score)?;
+
+    best.1
+        .get("artworkUrl100")?
+        .as_str()
+        .map(|s| s.replace("100x100bb", "600x600bb"))
+}
+
 /// Search the iTunes Store for the front cover of an album.
 ///
 /// Uses Apple's public search API — no authentication required. Searches
@@ -818,13 +894,9 @@ fn fetch_itunes_cover_url(client: &Client, artist: &str, album: &str) -> Option<
     let json: serde_json::Value = response.json().ok()?;
     let results = json.get("results")?.as_array()?;
 
-    // Take the first result's artwork URL and bump the resolution.
-    // Apple's URLs end in "100x100bb.jpg" — replace with "600x600bb".
-    results.iter().find_map(|r| {
-        r.get("artworkUrl100")?
-            .as_str()
-            .map(|s| s.replace("100x100bb", "600x600bb"))
-    })
+    // Prefer a result whose artist and album actually match the query, so
+    // unrelated top hits don't produce obviously wrong covers.
+    pick_best_itunes_cover_url(results, artist, album)
 }
 
 /// Attempt to download an image from the given URL and save it to `dest`.
@@ -889,6 +961,42 @@ pub fn run_enrich_targeted(
     quiet: bool,
     no_itunes: bool,
 ) {
+    run_enrich_targeted_with_options(conn, needed, quiet, no_itunes, false);
+}
+
+/// Like [`run_enrich_targeted`], but supports force refresh for the provided
+/// subset.
+pub fn run_enrich_targeted_with_options(
+    conn: &Connection,
+    needed: &std::collections::HashSet<(String, String)>,
+    quiet: bool,
+    no_itunes: bool,
+    force: bool,
+) {
+    if needed.is_empty() {
+        if !quiet {
+            eprintln!("No matching albums to enrich.");
+        }
+        return;
+    }
+
+    if force {
+        let mut albums: Vec<db::UncachedAlbum> = needed
+            .iter()
+            .map(|(artist, album)| db::UncachedAlbum {
+                artist: artist.clone(),
+                album: album.clone(),
+            })
+            .collect();
+        albums.sort_by(|a, b| a.artist.cmp(&b.artist).then_with(|| a.album.cmp(&b.album)));
+        eprintln!(
+            "Force mode enabled: refreshing {} selected album(s).",
+            albums.len()
+        );
+        run_enrich_albums(conn, albums, quiet, no_itunes, true);
+        return;
+    }
+
     let all_uncached = match db::uncached_albums(conn) {
         Ok(v) => v,
         Err(e) => {
@@ -901,7 +1009,7 @@ pub fn run_enrich_targeted(
         .into_iter()
         .filter(|a| needed.contains(&(a.artist.clone(), a.album.clone())))
         .collect();
-    run_enrich_albums(conn, albums, quiet, no_itunes);
+    run_enrich_albums(conn, albums, quiet, no_itunes, false);
 }
 
 /// Run the enrichment process: find all uncached albums and fetch their
@@ -921,9 +1029,10 @@ pub fn run_enrich(conn: &Connection, force: bool, quiet: bool, no_itunes: bool) 
         conn.execute("DELETE FROM album_cache", [])
             .expect("Failed to clear album_cache");
         eprintln!("Cleared album cache (force mode).");
+        eprintln!("Force mode enabled: refreshing existing cover files when re-fetching.");
     }
     let albums = db::uncached_albums(conn).expect("Failed to query uncached albums");
-    run_enrich_albums(conn, albums, quiet, no_itunes);
+    run_enrich_albums(conn, albums, quiet, no_itunes, force);
 }
 
 /// Inner enrichment loop shared by `run_enrich` and `run_enrich_targeted`.
@@ -932,6 +1041,7 @@ fn run_enrich_albums(
     albums: Vec<db::UncachedAlbum>,
     quiet: bool,
     no_itunes: bool,
+    force_redownload: bool,
 ) {
     if albums.is_empty() {
         if !quiet {
@@ -1047,6 +1157,7 @@ fn run_enrich_albums(
                 primary_mbid,
                 release_group_id.as_deref(),
                 &covers,
+                force_redownload,
             );
 
             // If still nothing, try alternate candidate releases from the search.
@@ -1151,8 +1262,13 @@ pub fn enrich_by_mbid(
             );
             return;
         }
-        let result =
-            download_cover_with_fallback(&client, mbid, release_group_id.as_deref(), &covers);
+        let result = download_cover_with_fallback(
+            &client,
+            mbid,
+            release_group_id.as_deref(),
+            &covers,
+            false,
+        );
         if result.is_some() {
             eprintln!("  Cover downloaded.");
         } else {
@@ -1252,6 +1368,67 @@ mod tests {
                 "Crosses".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_pick_best_itunes_cover_url_prefers_matching_artist_album() {
+        let results = vec![
+            serde_json::json!({
+                "artistName": "Amiteve",
+                "collectionName": "The Division Bell - Single",
+                "artworkUrl100": "https://example.com/amiteve/100x100bb.jpg"
+            }),
+            serde_json::json!({
+                "artistName": "Pink Floyd",
+                "collectionName": "The Division Bell",
+                "artworkUrl100": "https://example.com/pinkfloyd/100x100bb.jpg"
+            }),
+        ];
+
+        let chosen = pick_best_itunes_cover_url(&results, "Pink Floyd", "The Division Bell");
+        assert_eq!(
+            chosen.as_deref(),
+            Some("https://example.com/pinkfloyd/600x600bb.jpg")
+        );
+    }
+
+    #[test]
+    fn test_pick_best_itunes_cover_url_rejects_wrong_artist() {
+        let results = vec![serde_json::json!({
+            "artistName": "Amiteve",
+            "collectionName": "The Division Bell - Single",
+            "artworkUrl100": "https://example.com/amiteve/100x100bb.jpg"
+        })];
+
+        let chosen = pick_best_itunes_cover_url(&results, "Pink Floyd", "The Division Bell");
+        assert!(chosen.is_none());
+    }
+
+    #[test]
+    fn test_pick_best_itunes_cover_url_accepts_album_suffix_variant() {
+        let results = vec![serde_json::json!({
+            "artistName": "Pink Floyd",
+            "collectionName": "The Division Bell - Single",
+            "artworkUrl100": "https://example.com/pinkfloyd-single/100x100bb.jpg"
+        })];
+
+        let chosen = pick_best_itunes_cover_url(&results, "Pink Floyd", "The Division Bell");
+        assert_eq!(
+            chosen.as_deref(),
+            Some("https://example.com/pinkfloyd-single/600x600bb.jpg")
+        );
+    }
+
+    #[test]
+    fn test_should_reuse_existing_cover_default_mode() {
+        assert!(should_reuse_existing_cover(true, false));
+        assert!(!should_reuse_existing_cover(false, false));
+    }
+
+    #[test]
+    fn test_should_reuse_existing_cover_force_mode() {
+        assert!(!should_reuse_existing_cover(true, true));
+        assert!(!should_reuse_existing_cover(false, true));
     }
 
     #[test]

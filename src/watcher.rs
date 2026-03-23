@@ -127,6 +127,9 @@ impl CurrentTrack {
 ///   track, accumulated across multiple play/pause cycles
 pub struct ScrobbleTracker<F: FnMut(NewScrobble)> {
     current_track: Option<CurrentTrack>,
+    /// Local timestamp captured when tracking for the current track starts.
+    /// Used for report period attribution instead of evaluation time.
+    track_started_at: Option<chrono::NaiveDateTime>,
     is_playing: bool,
     has_seen_status: bool,
     playing_since: Option<Instant>,
@@ -140,6 +143,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
     pub fn new(scrobble_fn: F, source: String) -> Self {
         Self {
             current_track: None,
+            track_started_at: None,
             is_playing: false,
             has_seen_status: false,
             playing_since: None,
@@ -205,6 +209,7 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                     title,
                     duration_us,
                 });
+                self.track_started_at = Some(chrono::Local::now().naive_local());
                 self.accumulated_secs = 0.0;
 
                 // Do not blindly assume metadata implies Playing. If we've
@@ -284,8 +289,10 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
 
             // Only scrobble if the user listened for at least the threshold duration.
             if self.accumulated_secs >= threshold {
-                let now = chrono::Local::now()
-                    .naive_local()
+                let attribution_time = self
+                    .track_started_at
+                    .take()
+                    .unwrap_or_else(|| chrono::Local::now().naive_local())
                     .format("%Y-%m-%dT%H:%M:%S")
                     .to_string();
 
@@ -298,11 +305,13 @@ impl<F: FnMut(NewScrobble)> ScrobbleTracker<F> {
                     title: track.title,
                     track_duration_secs: track_dur,
                     played_duration_secs: self.accumulated_secs.round() as i64,
-                    scrobbled_at: now,
+                    scrobbled_at: attribution_time,
                     source: self.source.clone(),
                 };
                 (self.scrobble_fn)(scrobble);
             }
+
+            self.track_started_at = None;
         }
     }
 }
@@ -446,6 +455,8 @@ pub fn create_db_tracker(
 #[cfg(test)]
 pub struct TestableTracker {
     current_track: Option<CurrentTrack>,
+    /// Simulated timestamp for when current track tracking started.
+    track_started_at_secs: Option<f64>,
     is_playing: bool,
     has_seen_status: bool,
     /// Simulated timestamp (in seconds) when the current Playing stretch began.
@@ -465,6 +476,7 @@ impl TestableTracker {
     pub fn new() -> Self {
         Self {
             current_track: None,
+            track_started_at_secs: None,
             is_playing: false,
             has_seen_status: false,
             playing_since_secs: None,
@@ -499,17 +511,20 @@ impl TestableTracker {
             let threshold = track.threshold_secs();
             if self.accumulated_secs >= threshold {
                 let track_dur = track.duration_secs();
+                let attribution_secs = self.track_started_at_secs.take().unwrap_or(self.clock_secs);
                 let scrobble = NewScrobble {
                     artist: track.artist,
                     album: track.album,
                     title: track.title,
                     track_duration_secs: track_dur,
                     played_duration_secs: self.accumulated_secs.round() as i64,
-                    scrobbled_at: format!("test-time-{}", self.clock_secs),
+                    scrobbled_at: format!("test-time-{}", attribution_secs),
                     source: self.source.clone(),
                 };
                 self.scrobbled.push(scrobble);
             }
+
+            self.track_started_at_secs = None;
         }
     }
 
@@ -541,6 +556,7 @@ impl TestableTracker {
                     title,
                     duration_us,
                 });
+                self.track_started_at_secs = Some(self.clock_secs);
                 self.accumulated_secs = 0.0;
                 if self.has_seen_status {
                     self.playing_since_secs = if self.is_playing {
@@ -1012,6 +1028,32 @@ mod tests {
         });
 
         assert_eq!(tracker.scrobbled.len(), 0);
+    }
+
+    #[test]
+    fn test_scrobble_timestamp_uses_track_start_time() {
+        // Attribute the scrobble to when tracking started, not when the
+        // outgoing track was evaluated.
+        let mut tracker = TestableTracker::new();
+
+        tracker.advance_time(1_000.0);
+        tracker.handle_event(Event::Metadata {
+            artist: "Burial".into(),
+            album: "Untrue".into(),
+            title: "Untrue".into(),
+            duration_us: Some(60_000_000), // threshold = 30s
+        });
+
+        tracker.advance_time(35.0);
+        tracker.handle_event(Event::Metadata {
+            artist: "Deftones".into(),
+            album: "White Pony".into(),
+            title: "Digital Bath".into(),
+            duration_us: Some(291_000_000),
+        });
+
+        assert_eq!(tracker.scrobbled.len(), 1);
+        assert_eq!(tracker.scrobbled[0].scrobbled_at, "test-time-1000");
     }
 
     #[test]

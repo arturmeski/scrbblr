@@ -747,6 +747,21 @@ pub fn reset_missing_cover_timestamps(conn: &Connection) -> Result<usize> {
     Ok(count)
 }
 
+/// Reset `fetched_at` to NULL for cover-missing albums for one artist only.
+///
+/// Matching is case-insensitive (`LOWER(artist) = LOWER(?1)`), so callers can
+/// pass user input without worrying about exact casing.
+pub fn reset_missing_cover_timestamps_for_artist(conn: &Connection, artist: &str) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE cover_url IS NULL
+           AND LOWER(artist) = LOWER(?1)",
+        params![artist],
+    )?;
+    Ok(count)
+}
+
 pub fn uncached_albums(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
     // Retry incomplete cache entries at most once per 7 days.
     let retry_before = (chrono::Local::now().naive_local() - chrono::Duration::days(7))
@@ -768,6 +783,27 @@ pub fn uncached_albums(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
          ORDER BY s.artist, s.album",
     )?;
     let rows = stmt.query_map(params![retry_before], |row| {
+        Ok(UncachedAlbum {
+            artist: row.get(0)?,
+            album: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Return all distinct albums with scrobbles for a specific artist.
+///
+/// Matching is case-insensitive. Empty album names are excluded.
+pub fn albums_for_artist(conn: &Connection, artist: &str) -> Result<Vec<UncachedAlbum>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT s.artist, s.album
+         FROM scrobbles s
+         WHERE s.album != ''
+           AND LOWER(s.artist) = LOWER(?1)
+         ORDER BY s.artist, s.album",
+    )?;
+
+    let rows = stmt.query_map(params![artist], |row| {
         Ok(UncachedAlbum {
             artist: row.get(0)?,
             album: row.get(1)?,
@@ -1846,5 +1882,115 @@ mod tests {
             Some("covers/abc-123.jpg"),
             "CAA cover should replace the local cover"
         );
+    }
+
+    #[test]
+    fn test_albums_for_artist_case_insensitive() {
+        let conn = open_memory_db().unwrap();
+
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Pink Floyd".into(),
+                album: "The Division Bell".into(),
+                title: "Marooned".into(),
+                track_duration_secs: Some(329),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:00:00"),
+                source: "MPRIS".into(),
+            },
+        )
+        .unwrap();
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Pink Floyd".into(),
+                album: "The Wall".into(),
+                title: "Mother".into(),
+                track_duration_secs: Some(345),
+                played_duration_secs: 210,
+                scrobbled_at: today_at("10:05:00"),
+                source: "MPRIS".into(),
+            },
+        )
+        .unwrap();
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                title: "Digital Bath".into(),
+                track_duration_secs: Some(291),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:10:00"),
+                source: "MPRIS".into(),
+            },
+        )
+        .unwrap();
+
+        let albums = albums_for_artist(&conn, "pInK fLoYd").unwrap();
+        assert_eq!(albums.len(), 2);
+        assert!(
+            albums
+                .iter()
+                .any(|a| a.artist == "Pink Floyd" && a.album == "The Division Bell")
+        );
+        assert!(
+            albums
+                .iter()
+                .any(|a| a.artist == "Pink Floyd" && a.album == "The Wall")
+        );
+    }
+
+    #[test]
+    fn test_reset_missing_cover_timestamps_for_artist_only() {
+        let conn = open_memory_db().unwrap();
+
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Pink Floyd".into(),
+                album: "The Division Bell".into(),
+                musicbrainz_id: Some("mbid-1".into()),
+                cover_url: None,
+                genre: None,
+                fetched_at: today_at("12:00:00"),
+            },
+        )
+        .unwrap();
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("mbid-2".into()),
+                cover_url: None,
+                genre: None,
+                fetched_at: today_at("12:01:00"),
+            },
+        )
+        .unwrap();
+
+        let updated = reset_missing_cover_timestamps_for_artist(&conn, "pink floyd").unwrap();
+        assert_eq!(updated, 1);
+
+        let pink_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist = 'Pink Floyd' AND album = 'The Division Bell'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pink_fetched.is_none());
+
+        let deftones_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist = 'Deftones' AND album = 'White Pony'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let expected = today_at("12:01:00");
+        assert_eq!(deftones_fetched.as_deref(), Some(expected.as_str()));
     }
 }

@@ -189,6 +189,14 @@ enum Commands {
         #[arg(long)]
         retry_covers: bool,
 
+        /// Limit enrichment to albums by this artist (case-insensitive match).
+        ///
+        /// Useful when fixing one artist's covers/metadata without touching
+        /// the rest of the library. With `--force`, only this artist's albums
+        /// are re-fetched.
+        #[arg(long)]
+        artist: Option<String>,
+
         /// Skip the iTunes Search API when fetching cover art. Falls back
         /// directly to the Cover Art Archive (CAA). Useful if you prefer
         /// open-data sources or iTunes results are poor for your library.
@@ -719,6 +727,7 @@ fn main() {
             online,
             force,
             retry_covers,
+            artist,
             no_itunes,
             no_mpd_covers,
             mpd_host,
@@ -745,6 +754,31 @@ fn main() {
                 }
             };
 
+            let artist_needed = if let Some(ref artist_name) = artist {
+                match db::albums_for_artist(&conn, artist_name) {
+                    Ok(v) => {
+                        if v.is_empty() {
+                            eprintln!("No scrobbled albums found for artist \"{}\".", artist_name);
+                            return;
+                        }
+                        Some(
+                            v.into_iter()
+                                .map(|a| (a.artist, a.album))
+                                .collect::<std::collections::HashSet<_>>(),
+                        )
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[error] Failed to query albums for artist \"{}\": {}",
+                            artist_name, e
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+
             // Run MPD cover extraction first (fast, local, no rate limits).
             // Pre-populating cover_url means the online enrichment that follows
             // will skip fetching covers for albums that already have one.
@@ -753,7 +787,11 @@ fn main() {
                     host: mpd_host,
                     port: mpd_port,
                 };
-                mpd::run_mpd_cover_enrich(&mpd_cfg, &conn);
+                if let Some(ref needed) = artist_needed {
+                    mpd::run_mpd_cover_enrich_targeted(&mpd_cfg, &conn, needed);
+                } else {
+                    mpd::run_mpd_cover_enrich(&mpd_cfg, &conn);
+                }
             }
 
             // Online enrichment: MusicBrainz lookup for MBID + genre, Cover Art
@@ -761,14 +799,26 @@ fn main() {
             // Reset the cooldown for cover-missing albums before the online
             // pass so they are picked up by uncached_albums.
             if retry_covers {
-                match db::reset_missing_cover_timestamps(&conn) {
+                let reset = if let Some(ref artist_name) = artist {
+                    db::reset_missing_cover_timestamps_for_artist(&conn, artist_name)
+                } else {
+                    db::reset_missing_cover_timestamps(&conn)
+                };
+
+                match reset {
                     Ok(n) => eprintln!("Reset cooldown for {} album(s) missing covers.", n),
                     Err(e) => eprintln!("[warn] Failed to reset cover timestamps: {}", e),
                 }
             }
 
             if online {
-                enrich::run_enrich(&conn, force, false, no_itunes);
+                if let Some(ref needed) = artist_needed {
+                    enrich::run_enrich_targeted_with_options(
+                        &conn, needed, false, no_itunes, force,
+                    );
+                } else {
+                    enrich::run_enrich(&conn, force, false, no_itunes);
+                }
             }
         }
         Commands::LastScrobble { db_path } => {
