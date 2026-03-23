@@ -73,6 +73,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1032,6 +1033,139 @@ pub fn run_mpd_cover_enrich_targeted(
     }
 
     run_mpd_cover_enrich_albums(config, conn, albums);
+}
+
+/// Revalidate already-cached local MPD covers and re-fetch mismatches.
+///
+/// This command targets albums that already have `cover_url` pointing to an
+/// MPD-local path (`mpd_*.jpg`). For each candidate album it re-reads embedded
+/// art from MPD, applies the same resize/re-encode pipeline, then compares the
+/// resulting bytes to the existing file.
+///
+/// If bytes differ (or the file is missing), the local file is overwritten and
+/// `album_cache.fetched_at` is refreshed via [`db::set_local_cover`].
+pub fn run_mpd_cover_revalidate(config: &MpdConfig, conn: &Connection, artist: Option<&str>) {
+    let mut albums = match db::albums_with_local_mpd_cover(conn) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[error] Failed to query MPD-local covers: {}", e);
+            return;
+        }
+    };
+
+    if let Some(artist_name) = artist {
+        albums.retain(|a| a.artist.eq_ignore_ascii_case(artist_name));
+    }
+
+    if albums.is_empty() {
+        if let Some(artist_name) = artist {
+            eprintln!(
+                "No MPD-local covers found for artist \"{}\". Nothing to revalidate.",
+                artist_name
+            );
+        } else {
+            eprintln!("No MPD-local covers found. Nothing to revalidate.");
+        }
+        return;
+    }
+
+    let mut mpd_conn = match connect(config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[warn] MPD unreachable, skipping cover revalidation: {}", e);
+            return;
+        }
+    };
+
+    eprintln!("Revalidating {} MPD-local cover(s)...", albums.len());
+
+    let mut unchanged = 0;
+    let mut repaired = 0;
+    let mut skipped = 0;
+
+    for (i, album) in albums.iter().enumerate() {
+        eprintln!(
+            "[{}/{}] {} - {}",
+            i + 1,
+            albums.len(),
+            album.artist,
+            album.album
+        );
+
+        let file_uri = match search_song_for_album(&mut mpd_conn, &album.artist, &album.album) {
+            Some(f) => f,
+            None => {
+                eprintln!("  Not found in MPD database, skipping.");
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let picture_bytes = match read_picture(&mut mpd_conn, &file_uri) {
+            Some(b) => b,
+            None => {
+                eprintln!("  No embedded cover art found, skipping.");
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let processed = match enrich::resize_cover_bytes(&picture_bytes) {
+            Some(b) => b,
+            None => {
+                eprintln!("  [warn] Could not decode embedded cover, skipping.");
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let dest = Path::new(&album.cover_url);
+        let needs_repair = match std::fs::read(dest) {
+            Ok(existing) => existing != processed,
+            Err(_) => true,
+        };
+
+        if !needs_repair {
+            eprintln!("  OK: existing file matches MPD extraction.");
+            unchanged += 1;
+            continue;
+        }
+
+        if let Some(parent) = dest.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("  [warn] Failed to create parent directory: {}", e);
+            skipped += 1;
+            continue;
+        }
+
+        if let Err(e) = std::fs::write(dest, &processed) {
+            eprintln!("  [warn] Failed to write repaired cover: {}", e);
+            skipped += 1;
+            continue;
+        }
+
+        match db::set_local_cover(conn, &album.artist, &album.album, &album.cover_url) {
+            Ok(_) => {
+                eprintln!("  Repaired: {}", album.cover_url);
+                repaired += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "  [error] Repaired file but failed to update album_cache: {}",
+                    e
+                );
+                skipped += 1;
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!("MPD cover revalidation complete:");
+    eprintln!("  Albums checked: {}", albums.len());
+    eprintln!("  Covers unchanged: {}", unchanged);
+    eprintln!("  Covers repaired: {}", repaired);
+    eprintln!("  Skipped: {}", skipped);
 }
 
 /// Inner loop shared by `run_mpd_cover_enrich` and

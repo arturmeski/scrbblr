@@ -271,10 +271,17 @@ scrbblr enrich [OPTIONS]
     --online             Fetch metadata and covers from MusicBrainz / iTunes / CAA
     --force              Re-fetch all albums from MusicBrainz (implies --online)
     --retry-covers       Reset the 7-day cooldown for albums missing covers
+    --artist <ARTIST>    Limit enrichment to one artist (case-insensitive)
     --no-itunes          Skip iTunes; fall back directly to Cover Art Archive
     --no-mpd-covers      Skip MPD embedded cover extraction
     --mpd-host <HOST>    MPD host for cover extraction [default: localhost]
     --mpd-port <PORT>    MPD port for cover extraction [default: 6600]
+    --db-path <PATH>     Path to the SQLite database
+
+scrbblr repair-mpd-covers [OPTIONS]
+    --artist <ARTIST>    Limit repair to one artist (case-insensitive)
+    --mpd-host <HOST>    MPD host for cover validation [default: localhost]
+    --mpd-port <PORT>    MPD port for cover validation [default: 6600]
     --db-path <PATH>     Path to the SQLite database
 
 scrbblr last-scrobble [OPTIONS]
@@ -347,6 +354,26 @@ Genre normalisation notes:
 Downloaded covers are stored in:
 
 `~/.local/share/scrbblr/covers/`
+
+#### Repairing suspect MPD covers (`repair-mpd-covers`)
+
+If you already have cached MPD-local covers (`mpd_*.jpg`) and suspect some are
+incomplete/corrupted, run:
+
+```bash
+scrbblr repair-mpd-covers
+```
+
+This command re-extracts embedded art from MPD for albums with MPD-local cover
+paths in `album_cache`, applies the same resize/re-encode pipeline, and
+compares bytes with the existing file. Missing or mismatched files are
+automatically overwritten.
+
+Target one artist if needed:
+
+```bash
+scrbblr repair-mpd-covers --artist "Deftones"
+```
 
 #### Manually pinning an album (`pin-album`)
 

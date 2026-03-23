@@ -1,12 +1,14 @@
 //! scrbblr — a local music scrobbler for MPRIS and MPD on Linux.
 //!
-//! This is the CLI entry point. It provides five subcommands:
+//! This is the CLI entry point. It provides six subcommands:
 //!
 //! - `watch` — monitors a player via `playerctl` and/or MPD, recording
 //!   scrobbles to SQLite. Both sources can run simultaneously.
 //! - `report` — generates listening statistics from the stored data
 //! - `enrich` — fetches album art and genre info from MusicBrainz,
 //!   and/or extracts embedded covers from MPD
+//! - `repair-mpd-covers` — revalidate MPD-local cached covers and repair
+//!   any mismatches by re-fetching from MPD
 //! - `last-scrobble`— prints the newest scrobble timestamp
 //! - `pin-album`    — manually assign a MusicBrainz ID to an album
 //!
@@ -216,6 +218,28 @@ enum Commands {
 
         /// MPD server TCP port. Used for embedded cover extraction when
         /// connecting via TCP (ignored for Unix socket paths).
+        #[arg(long, default_value = "6600")]
+        mpd_port: u16,
+
+        /// Path to the SQLite database file. Same default as `watch`.
+        #[arg(long)]
+        db_path: Option<String>,
+    },
+    /// Revalidate cached MPD-local covers and automatically repair mismatches.
+    ///
+    /// This checks albums whose `cover_url` points to an MPD-generated local
+    /// file (`mpd_*.jpg`), re-extracts embedded art from MPD, and compares the
+    /// processed bytes. Missing or mismatched files are overwritten.
+    RepairMpdCovers {
+        /// Limit revalidation to albums by this artist (case-insensitive match).
+        #[arg(long)]
+        artist: Option<String>,
+
+        /// MPD server hostname, IP address, or Unix socket path.
+        #[arg(long, default_value = "localhost")]
+        mpd_host: String,
+
+        /// MPD server TCP port. Ignored for Unix socket paths.
         #[arg(long, default_value = "6600")]
         mpd_port: u16,
 
@@ -820,6 +844,27 @@ fn main() {
                     enrich::run_enrich(&conn, force, false, no_itunes);
                 }
             }
+        }
+        Commands::RepairMpdCovers {
+            artist,
+            mpd_host,
+            mpd_port,
+            db_path,
+        } => {
+            let path = db_path.unwrap_or_else(default_db_path);
+            let conn = match db::open_db(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to open database at {}: {}", path, e);
+                    std::process::exit(1);
+                }
+            };
+
+            let mpd_cfg = mpd::MpdConfig {
+                host: mpd_host,
+                port: mpd_port,
+            };
+            mpd::run_mpd_cover_revalidate(&mpd_cfg, &conn, artist.as_deref());
         }
         Commands::LastScrobble { db_path } => {
             let path = db_path.unwrap_or_else(default_db_path);
