@@ -1053,25 +1053,18 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .flatten()
                     .and_then(|m| m.cover_url);
                 let cover = resolve_cover(cover_url, &mut cover_files);
-                // Prepend a subtle source dot to the album name if we know
-                // the dominant source for this album.
-                let album_cell = if let Some(src) = a.dominant_source.as_deref() {
-                    if let Some((bg, _)) = source_colours(src, &ordered_sources) {
-                        format!(
-                            "<span style=\"display:inline-block;width:9px;height:9px;\
-                             border-radius:50%;background:{};margin-right:5px;\
-                             vertical-align:middle\"></span>{}",
-                            bg,
-                            html_escape(&a.album)
-                        )
-                    } else {
-                        html_escape(&a.album)
-                    }
-                } else {
-                    html_escape(&a.album)
-                };
+                let source_cell = a
+                    .dominant_source
+                    .as_deref()
+                    .map(html_escape)
+                    .unwrap_or_else(|| "-".to_string());
                 BarRow {
-                    cells: vec![(i + 1).to_string(), html_escape(&a.artist), album_cell],
+                    cells: vec![
+                        (i + 1).to_string(),
+                        html_escape(&a.artist),
+                        html_escape(&a.album),
+                        source_cell,
+                    ],
                     value: a.plays,
                     suffix: format_duration(a.listen_time_secs),
                     cover,
@@ -1082,7 +1075,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
         write_bar_table(
             &mut h,
             "Top Albums",
-            &["#", "Artist", "Album", "Plays", ""],
+            &["#", "Artist", "Album", "Source", "Plays", ""],
             &album_rows,
         );
 
@@ -1146,23 +1139,18 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .flatten()
                     .and_then(|m| m.cover_url);
                 let cover = resolve_cover(cover_url, &mut cover_files);
-                let title_cell = if let Some(src) = t.dominant_source.as_deref() {
-                    if let Some((bg, _)) = source_colours(src, &ordered_sources) {
-                        format!(
-                            "<span style=\"display:inline-block;width:9px;height:9px;\
-                             border-radius:50%;background:{};margin-right:5px;\
-                             vertical-align:middle\"></span>{}",
-                            bg,
-                            html_escape(&t.title)
-                        )
-                    } else {
-                        html_escape(&t.title)
-                    }
-                } else {
-                    html_escape(&t.title)
-                };
+                let source_cell = t
+                    .dominant_source
+                    .as_deref()
+                    .map(html_escape)
+                    .unwrap_or_else(|| "-".to_string());
                 BarRow {
-                    cells: vec![(i + 1).to_string(), html_escape(&t.artist), title_cell],
+                    cells: vec![
+                        (i + 1).to_string(),
+                        html_escape(&t.artist),
+                        html_escape(&t.title),
+                        source_cell,
+                    ],
                     value: t.plays,
                     suffix: format_duration(t.listen_time_secs),
                     cover,
@@ -1173,7 +1161,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
         write_bar_table(
             &mut h,
             "Top Tracks",
-            &["#", "Artist", "Title", "Plays", ""],
+            &["#", "Artist", "Title", "Source", "Plays", ""],
             &track_rows,
         );
 
@@ -1294,7 +1282,7 @@ h1, h2, h3 { margin: 0; }
 .kpi .v { margin-top: 4px; font-size: 22px; font-weight: 700; }
 section { margin-top: 18px; }
 .section-title { font-size: 16px; margin-bottom: 8px; }
-.card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.card { background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; overflow-x: auto; overflow-y: hidden; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 th { font-size: 11px; color: var(--muted); letter-spacing: .02em; text-transform: uppercase; }
@@ -1344,6 +1332,11 @@ tr:last-child td { border-bottom: none; }
   .wrap { padding: 16px 12px 36px; }
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .jump-nav { margin-top: 10px; padding: 7px; }
+  th, td { padding: 7px 8px; }
+  .source-col { display: none; }
+  .bar-cell { width: 32%; }
+  .bar-wrap { gap: 4px; }
+  .bar-label { font-size: 11px; }
   /* On mobile show rank + duration only; drop the raw play-count and the bar graphic.
      The .bar-label (duration text) remains visible inside .bar-cell. */
   .play-count { display: none; }
@@ -1538,7 +1531,12 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
     // it can be hidden together with the td.play-count cells on mobile.
     let play_count_idx = headers.len().saturating_sub(2);
     for (i, hdr) in headers.iter().enumerate() {
-        if i == play_count_idx {
+        if *hdr == "Source" {
+            h.linef(format_args!(
+                "<th class=\"source-col\">{}</th>",
+                html_escape(hdr)
+            ));
+        } else if i == play_count_idx {
             h.linef(format_args!(
                 "<th class=\"play-count\">{}</th>",
                 html_escape(hdr)
@@ -1564,8 +1562,17 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
                 h.line("<td><span class=\"mini-ph\"></span></td>");
             }
         }
-        for cell in &row.cells {
-            if row.raw_cells {
+        for (i, cell) in row.cells.iter().enumerate() {
+            if headers.get(i).is_some_and(|h| *h == "Source") {
+                if row.raw_cells {
+                    h.linef(format_args!("<td class=\"source-col\">{}</td>", cell));
+                } else {
+                    h.linef(format_args!(
+                        "<td class=\"source-col\">{}</td>",
+                        html_escape(cell)
+                    ));
+                }
+            } else if row.raw_cells {
                 h.linef(format_args!("<td>{}</td>", cell));
             } else {
                 h.linef(format_args!("<td>{}</td>", html_escape(cell)));
