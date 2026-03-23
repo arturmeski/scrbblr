@@ -55,7 +55,7 @@ mod mpd;
 mod report;
 mod watcher;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::BufRead;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -75,6 +75,39 @@ const DEFAULT_PLAYER: &str = "com.blitzfc.qbz";
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum EnrichPipeline {
+    Mpd,
+    Online,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum EnrichFetch {
+    All,
+    Covers,
+    Genres,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum EnrichRetry {
+    None,
+    Covers,
+    Genres,
+    All,
+    MpdGenres,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum CoverSource {
+    ItunesCaa,
+    Caa,
 }
 
 #[derive(Subcommand)]
@@ -164,39 +197,39 @@ enum Commands {
     },
     /// Fetch album art and genre info for all scrobbled albums.
     ///
-    /// By default, connects to MPD and extracts embedded cover art from music
-    /// files via `readpicture` — fully offline, no network access required.
-    /// Pass `--no-mpd-covers` to skip this step.
+    /// By default, runs both stages:
     ///
-    /// Pass `--online` to also query MusicBrainz for album metadata (MBID,
-    /// genre) and download cover art. Cover art is sourced from iTunes first
-    /// (fast, no rate limit), then the Cover Art Archive as fallback. Pass
-    /// `--no-itunes` to skip iTunes and use only the Cover Art Archive.
+    /// 1. MPD embedded-cover extraction (`readpicture`, offline)
+    /// 2. Online metadata/cover enrichment (MusicBrainz + iTunes/CAA)
+    ///
+    /// Use `--pipeline`, `--fetch`, and `--retry` to narrow the behaviour.
     Enrich {
-        /// Query MusicBrainz for album metadata (MBID, genre) and download
-        /// cover art from the Cover Art Archive for albums that still have
-        /// no cover after local extraction.
-        #[arg(long)]
-        online: bool,
+        /// Which enrichment stage(s) to run.
+        #[arg(long, value_enum, default_value = "both")]
+        pipeline: EnrichPipeline,
+
+        /// Which metadata to fetch during the online stage.
+        #[arg(long, value_enum, default_value = "all")]
+        fetch: EnrichFetch,
+
+        /// Reset cooldown before online enrichment.
+        ///
+        /// - `none`: keep normal 7-day cooldown
+        /// - `covers`: retry cover-missing rows
+        /// - `genres`: retry genre-missing rows
+        /// - `all`: retry rows missing either cover or genre
+        /// - `mpd-genres`: retry genre-missing rows only for MPD-sourced albums
+        #[arg(long, value_enum, default_value = "none")]
+        retry: EnrichRetry,
+
+        /// Cover source policy for the online stage.
+        #[arg(long, value_enum, default_value = "itunes-caa")]
+        cover_source: CoverSource,
 
         /// Re-fetch metadata for all albums from MusicBrainz, even those
-        /// already cached. Only meaningful together with `--online`.
+        /// already cached. Only meaningful when `--pipeline` includes `online`.
         #[arg(long)]
         force: bool,
-
-        /// Re-attempt cover downloads for albums that have metadata cached
-        /// but no cover art yet. Resets the 7-day cooldown for those albums
-        /// only, so the next `--online` run retries them. Does not affect
-        /// albums that already have a cover.
-        #[arg(long)]
-        retry_covers: bool,
-
-        /// Re-attempt genre lookups for MPD-sourced albums that still have no
-        /// genre. Resets the 7-day cooldown for those albums only, so the next
-        /// `--online` run retries them. Does not affect albums that already
-        /// have a genre.
-        #[arg(long)]
-        retry_mpd_genres: bool,
 
         /// Limit enrichment to albums by this artist (case-insensitive match).
         ///
@@ -206,25 +239,12 @@ enum Commands {
         #[arg(long)]
         artist: Option<String>,
 
-        /// Skip the iTunes Search API when fetching cover art. Falls back
-        /// directly to the Cover Art Archive (CAA). Useful if you prefer
-        /// open-data sources or iTunes results are poor for your library.
-        #[arg(long)]
-        no_itunes: bool,
-
-        /// Disable the MPD embedded cover extraction step. By default,
-        /// `enrich` connects to MPD and extracts embedded cover art from
-        /// music files via `readpicture` before doing anything else.
-        #[arg(long)]
-        no_mpd_covers: bool,
-
         /// MPD server hostname, IP address, or Unix socket path.
-        /// Used for embedded cover extraction (unless `--no-mpd-covers`).
+        /// Used for MPD extraction when `--pipeline` includes `mpd`.
         #[arg(long, default_value = "localhost")]
         mpd_host: String,
 
-        /// MPD server TCP port. Used for embedded cover extraction when
-        /// connecting via TCP (ignored for Unix socket paths).
+        /// MPD server TCP port. Ignored for Unix socket paths.
         #[arg(long, default_value = "6600")]
         mpd_port: u16,
 
@@ -595,7 +615,7 @@ fn run_report(
         // iTunes is tried first (fast, no rate limit), then CAA as fallback.
         // Respects the 7-day cooldown so we don't hammer MusicBrainz on every
         // report run.
-        enrich::run_enrich_targeted(&conn, &needed, true, false);
+        enrich::run_enrich_targeted(&conn, &needed, true);
     }
 
     if html {
@@ -755,29 +775,38 @@ fn main() {
             );
         }
         Commands::Enrich {
-            online,
+            pipeline,
+            fetch,
+            retry,
+            cover_source,
             force,
-            retry_covers,
-            retry_mpd_genres,
             artist,
-            no_itunes,
-            no_mpd_covers,
             mpd_host,
             mpd_port,
             db_path,
         } => {
-            if retry_mpd_genres && !online {
-                eprintln!("--retry-mpd-genres requires --online.");
+            let run_mpd = matches!(pipeline, EnrichPipeline::Mpd | EnrichPipeline::Both);
+            let run_online = matches!(pipeline, EnrichPipeline::Online | EnrichPipeline::Both);
+            let wants_covers = matches!(fetch, EnrichFetch::All | EnrichFetch::Covers);
+
+            if force && !run_online {
+                eprintln!("--force requires --pipeline online or --pipeline both.");
                 std::process::exit(1);
             }
 
-            if no_mpd_covers && !online {
-                eprintln!("Nothing to do. Pass --online and/or omit --no-mpd-covers.");
+            if !matches!(retry, EnrichRetry::None) && !run_online {
+                eprintln!("--retry requires --pipeline online or --pipeline both.");
+                std::process::exit(1);
+            }
+
+            if run_mpd && !wants_covers && !run_online {
                 eprintln!(
-                    "  (default)      Extract embedded covers from music files via MPD (offline)"
-                );
-                eprintln!(
-                    "  --online       Fetch metadata and covers from MusicBrainz / iTunes / CAA"
+                    "Nothing to do: --pipeline mpd only handles covers, but --fetch {} excludes covers.",
+                    match fetch {
+                        EnrichFetch::Genres => "genres",
+                        EnrichFetch::All => "all",
+                        EnrichFetch::Covers => "covers",
+                    }
                 );
                 std::process::exit(0);
             }
@@ -816,10 +845,10 @@ fn main() {
                 None
             };
 
-            // Run MPD cover extraction first (fast, local, no rate limits).
-            // Pre-populating cover_url means the online enrichment that follows
-            // will skip fetching covers for albums that already have one.
-            if !no_mpd_covers {
+            // Run MPD cover extraction first (fast, local, no rate limits)
+            // when the selected pipeline includes MPD and the fetch mode asks
+            // for covers.
+            if run_mpd && wants_covers {
                 let mpd_cfg = mpd::MpdConfig {
                     host: mpd_host,
                     port: mpd_port,
@@ -831,45 +860,79 @@ fn main() {
                 }
             }
 
-            // Online enrichment: MusicBrainz lookup for MBID + genre, Cover Art
-            // Archive for any albums still missing a cover after the MPD pass.
-            // Reset the cooldown for cover-missing albums before the online
-            // pass so they are picked up by uncached_albums.
-            if retry_covers {
-                let reset = if let Some(ref artist_name) = artist {
-                    db::reset_missing_cover_timestamps_for_artist(&conn, artist_name)
-                } else {
-                    db::reset_missing_cover_timestamps(&conn)
-                };
+            if run_online {
+                // Optional retry selector: reset cooldown timestamps so the
+                // online stage revisits selected missing fields immediately.
+                if !matches!(retry, EnrichRetry::None) {
+                    let reset = match retry {
+                        EnrichRetry::None => Ok(0),
+                        EnrichRetry::Covers => {
+                            if let Some(ref artist_name) = artist {
+                                db::reset_missing_cover_timestamps_for_artist(&conn, artist_name)
+                            } else {
+                                db::reset_missing_cover_timestamps(&conn)
+                            }
+                        }
+                        EnrichRetry::Genres => {
+                            if let Some(ref artist_name) = artist {
+                                db::reset_missing_genre_timestamps_for_artist(&conn, artist_name)
+                            } else {
+                                db::reset_missing_genre_timestamps(&conn)
+                            }
+                        }
+                        EnrichRetry::All => {
+                            if let Some(ref artist_name) = artist {
+                                db::reset_incomplete_timestamps_for_artist(&conn, artist_name)
+                            } else {
+                                db::reset_incomplete_timestamps(&conn)
+                            }
+                        }
+                        EnrichRetry::MpdGenres => {
+                            if let Some(ref artist_name) = artist {
+                                db::reset_missing_genre_timestamps_for_mpd_artist(
+                                    &conn,
+                                    artist_name,
+                                )
+                            } else {
+                                db::reset_missing_genre_timestamps_for_mpd(&conn)
+                            }
+                        }
+                    };
 
-                match reset {
-                    Ok(n) => eprintln!("Reset cooldown for {} album(s) missing covers.", n),
-                    Err(e) => eprintln!("[warn] Failed to reset cover timestamps: {}", e),
-                }
-            }
-
-            if retry_mpd_genres {
-                let reset = if let Some(ref artist_name) = artist {
-                    db::reset_missing_genre_timestamps_for_mpd_artist(&conn, artist_name)
-                } else {
-                    db::reset_missing_genre_timestamps_for_mpd(&conn)
-                };
-
-                match reset {
-                    Ok(n) => {
-                        eprintln!("Reset cooldown for {} MPD album(s) missing genres.", n)
+                    match reset {
+                        Ok(n) => eprintln!(
+                            "Reset cooldown for {} album(s) via --retry {}.",
+                            n,
+                            match retry {
+                                EnrichRetry::None => "none",
+                                EnrichRetry::Covers => "covers",
+                                EnrichRetry::Genres => "genres",
+                                EnrichRetry::All => "all",
+                                EnrichRetry::MpdGenres => "mpd-genres",
+                            }
+                        ),
+                        Err(e) => eprintln!("[warn] Failed to reset retry timestamps: {}", e),
                     }
-                    Err(e) => eprintln!("[warn] Failed to reset MPD genre timestamps: {}", e),
                 }
-            }
 
-            if online {
+                let cover_source_mode = match cover_source {
+                    CoverSource::ItunesCaa => enrich::CoverSourceMode::ItunesThenCaa,
+                    CoverSource::Caa => enrich::CoverSourceMode::CaaOnly,
+                };
+                let fetch_mode = match fetch {
+                    EnrichFetch::All => enrich::OnlineFetchMode::All,
+                    EnrichFetch::Covers => enrich::OnlineFetchMode::Covers,
+                    EnrichFetch::Genres => enrich::OnlineFetchMode::Genres,
+                };
+                let options = enrich::OnlineEnrichOptions {
+                    fetch_mode,
+                    cover_source: cover_source_mode,
+                };
+
                 if let Some(ref needed) = artist_needed {
-                    enrich::run_enrich_targeted_with_options(
-                        &conn, needed, false, no_itunes, force,
-                    );
+                    enrich::run_enrich_targeted_with_options(&conn, needed, false, force, options);
                 } else {
-                    enrich::run_enrich(&conn, force, false, no_itunes);
+                    enrich::run_enrich_with_options(&conn, force, false, options);
                 }
             }
         }

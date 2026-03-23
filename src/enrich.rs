@@ -13,8 +13,8 @@
 //! 2. For each, searches MusicBrainz for matching releases (to get MBID and
 //!    genre/tag data — always done regardless of cover source).
 //! 3. Tries iTunes Search API first for cover art (fast, no rate limit,
-//!    good commercial coverage). Pass `--no-itunes` to skip.
-//! 4. If iTunes has no cover (or `--no-itunes`), falls back to the Cover Art
+//!    good commercial coverage). Can be switched to CAA-only mode.
+//! 4. If iTunes has no cover (or iTunes is disabled), falls back to the Cover Art
 //!    Archive using the MBID from step 2:
 //!    a. The specific release endpoint
 //!    b. The release-group endpoint (covers any edition of the album)
@@ -96,6 +96,52 @@ const MAX_COVER_DIM: u32 = 500;
 
 /// JPEG quality used when re-encoding resized cover art (0–100).
 const COVER_JPEG_QUALITY: u8 = 85;
+
+/// What the online enrichment stage should fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineFetchMode {
+    /// Fetch genres and covers.
+    All,
+    /// Fetch covers only.
+    Covers,
+    /// Fetch genres only.
+    Genres,
+}
+
+impl OnlineFetchMode {
+    fn wants_covers(self) -> bool {
+        matches!(self, Self::All | Self::Covers)
+    }
+
+    fn wants_genres(self) -> bool {
+        matches!(self, Self::All | Self::Genres)
+    }
+}
+
+/// Cover source policy for the online stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverSourceMode {
+    /// Try iTunes first, then fall back to Cover Art Archive.
+    ItunesThenCaa,
+    /// Skip iTunes and use only Cover Art Archive.
+    CaaOnly,
+}
+
+/// Options controlling online enrichment behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct OnlineEnrichOptions {
+    pub fetch_mode: OnlineFetchMode,
+    pub cover_source: CoverSourceMode,
+}
+
+impl Default for OnlineEnrichOptions {
+    fn default() -> Self {
+        Self {
+            fetch_mode: OnlineFetchMode::All,
+            cover_source: CoverSourceMode::ItunesThenCaa,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // MusicBrainz API response types (only the fields we need)
@@ -959,9 +1005,8 @@ pub fn run_enrich_targeted(
     conn: &Connection,
     needed: &std::collections::HashSet<(String, String)>,
     quiet: bool,
-    no_itunes: bool,
 ) {
-    run_enrich_targeted_with_options(conn, needed, quiet, no_itunes, false);
+    run_enrich_targeted_with_options(conn, needed, quiet, false, OnlineEnrichOptions::default());
 }
 
 /// Like [`run_enrich_targeted`], but supports force refresh for the provided
@@ -970,8 +1015,8 @@ pub fn run_enrich_targeted_with_options(
     conn: &Connection,
     needed: &std::collections::HashSet<(String, String)>,
     quiet: bool,
-    no_itunes: bool,
     force: bool,
+    options: OnlineEnrichOptions,
 ) {
     if needed.is_empty() {
         if !quiet {
@@ -993,7 +1038,7 @@ pub fn run_enrich_targeted_with_options(
             "Force mode enabled: refreshing {} selected album(s).",
             albums.len()
         );
-        run_enrich_albums(conn, albums, quiet, no_itunes, true);
+        run_enrich_albums(conn, albums, quiet, true, options);
         return;
     }
 
@@ -1009,7 +1054,7 @@ pub fn run_enrich_targeted_with_options(
         .into_iter()
         .filter(|a| needed.contains(&(a.artist.clone(), a.album.clone())))
         .collect();
-    run_enrich_albums(conn, albums, quiet, no_itunes, false);
+    run_enrich_albums(conn, albums, quiet, false, options);
 }
 
 /// Run the enrichment process: find all uncached albums and fetch their
@@ -1023,8 +1068,13 @@ pub fn run_enrich_targeted_with_options(
 /// - `force` — if true, re-fetch all albums even if already cached
 /// - `quiet` — if true, suppress the "nothing to do" hint (used when called
 ///   from `report --html` where the user didn't explicitly ask for enrichment)
-/// - `no_itunes` — if true, skip the iTunes cover lookup and go straight to CAA
-pub fn run_enrich(conn: &Connection, force: bool, quiet: bool, no_itunes: bool) {
+/// Run online enrichment with explicit fetch/source options.
+pub fn run_enrich_with_options(
+    conn: &Connection,
+    force: bool,
+    quiet: bool,
+    options: OnlineEnrichOptions,
+) {
     if force {
         conn.execute("DELETE FROM album_cache", [])
             .expect("Failed to clear album_cache");
@@ -1032,7 +1082,7 @@ pub fn run_enrich(conn: &Connection, force: bool, quiet: bool, no_itunes: bool) 
         eprintln!("Force mode enabled: refreshing existing cover files when re-fetching.");
     }
     let albums = db::uncached_albums(conn).expect("Failed to query uncached albums");
-    run_enrich_albums(conn, albums, quiet, no_itunes, force);
+    run_enrich_albums(conn, albums, quiet, force, options);
 }
 
 /// Inner enrichment loop shared by `run_enrich` and `run_enrich_targeted`.
@@ -1040,8 +1090,8 @@ fn run_enrich_albums(
     conn: &Connection,
     albums: Vec<db::UncachedAlbum>,
     quiet: bool,
-    no_itunes: bool,
     force_redownload: bool,
+    options: OnlineEnrichOptions,
 ) {
     if albums.is_empty() {
         if !quiet {
@@ -1053,11 +1103,15 @@ fn run_enrich_albums(
 
     let client = build_client();
     let covers = covers_dir();
+    let fetch_covers = options.fetch_mode.wants_covers();
+    let fetch_genres = options.fetch_mode.wants_genres();
+    let use_itunes = fetch_covers && matches!(options.cover_source, CoverSourceMode::ItunesThenCaa);
 
     eprintln!("Found {} album(s) to enrich.", albums.len());
 
     let mut success_count = 0;
     let mut cover_count = 0;
+    let mut genre_count = 0;
 
     for (i, album) in albums.iter().enumerate() {
         eprintln!(
@@ -1067,6 +1121,12 @@ fn run_enrich_albums(
             album.artist,
             album.album
         );
+
+        let existing = db::album_cache_meta(conn, &album.artist, &album.album)
+            .ok()
+            .flatten();
+        let existing_genre = existing.as_ref().and_then(|m| m.genre.clone());
+        let existing_mbid = existing.as_ref().and_then(|m| m.mbid.clone());
 
         // Step 1: Search MusicBrainz for matching releases.
         // Always done — we need the MBID for genre data and as the CAA
@@ -1079,7 +1139,9 @@ fn run_enrich_albums(
 
             // Without an MBID we can't query CAA, so iTunes is the only
             // cover option. Use a hash-based filename since there's no MBID.
-            let cover = if no_itunes {
+            let cover = if !fetch_covers {
+                None
+            } else if !use_itunes {
                 eprintln!("  iTunes disabled, no cover available.");
                 None
             } else {
@@ -1094,7 +1156,7 @@ fn run_enrich_albums(
             if cover.is_some() {
                 eprintln!("  Cover downloaded (from iTunes).");
                 cover_count += 1;
-            } else if !no_itunes {
+            } else if fetch_covers && use_itunes {
                 eprintln!("  No cover art available from any source.");
             }
 
@@ -1102,9 +1164,9 @@ fn run_enrich_albums(
             let entry = AlbumCacheEntry {
                 artist: album.artist.clone(),
                 album: album.album.clone(),
-                musicbrainz_id: None,
+                musicbrainz_id: existing_mbid,
                 cover_url: cover,
-                genre: None,
+                genre: existing_genre,
                 fetched_at: now_str(),
             };
             match db::upsert_album_cache(conn, &entry) {
@@ -1119,16 +1181,26 @@ fn run_enrich_albums(
         eprintln!("  Found MBID: {}", primary_mbid);
 
         // Step 2: Fetch genres/tags and release-group ID from the primary release.
-        thread::sleep(RATE_LIMIT_DELAY);
-        let (genre, release_group_id) = fetch_release_details(&client, primary_mbid);
-        if let Some(ref g) = genre {
+        let (fetched_genre, release_group_id) = if fetch_genres || fetch_covers {
+            thread::sleep(RATE_LIMIT_DELAY);
+            fetch_release_details(&client, primary_mbid)
+        } else {
+            (None, None)
+        };
+
+        if let Some(ref g) = fetched_genre {
+            if fetch_genres {
+                genre_count += 1;
+            }
             eprintln!("  Genres: {}", g);
         }
 
         // Step 3: Try iTunes first — it's fast, has no rate limit, and has
         // good commercial coverage. Reuse the MBID-based filename so the file
         // is still associated with the correct release regardless of source.
-        let mut cover = if no_itunes {
+        let mut cover = if !fetch_covers {
+            None
+        } else if !use_itunes {
             None
         } else {
             let itunes_cover = fetch_itunes_cover_url(&client, &album.artist, &album.album)
@@ -1145,8 +1217,8 @@ fn run_enrich_albums(
         // Step 4: If iTunes had no cover, fall back to the Cover Art Archive.
         // CAA is better for obscure or non-commercial releases, and has the
         // highest possible resolution for releases it does have.
-        if cover.is_none() {
-            if !no_itunes {
+        if fetch_covers && cover.is_none() {
+            if use_itunes {
                 eprintln!("  No iTunes cover. Trying Cover Art Archive...");
             }
 
@@ -1181,9 +1253,15 @@ fn run_enrich_albums(
 
         if cover.is_some() {
             cover_count += 1;
-        } else {
+        } else if fetch_covers {
             eprintln!("  No cover art available from any source.");
         }
+
+        let genre_to_store = if fetch_genres {
+            fetched_genre.or(existing_genre)
+        } else {
+            existing_genre
+        };
 
         // Step 5: Store the result in album_cache.
         let entry = AlbumCacheEntry {
@@ -1191,7 +1269,7 @@ fn run_enrich_albums(
             album: album.album.clone(),
             musicbrainz_id: Some(primary_mbid.clone()),
             cover_url: cover,
-            genre,
+            genre: genre_to_store,
             fetched_at: now_str(),
         };
 
@@ -1205,7 +1283,12 @@ fn run_enrich_albums(
     eprintln!("Enrichment complete:");
     eprintln!("  Albums processed: {}", albums.len());
     eprintln!("  Successfully cached: {}", success_count);
-    eprintln!("  Covers downloaded: {}", cover_count);
+    if fetch_covers {
+        eprintln!("  Covers downloaded: {}", cover_count);
+    }
+    if fetch_genres {
+        eprintln!("  Albums with genres fetched: {}", genre_count);
+    }
     eprintln!("  Covers directory: {}", covers.display());
 }
 

@@ -268,15 +268,14 @@ scrbblr report [OPTIONS]
     --db-path <PATH>     Path to the SQLite database
 
 scrbblr enrich [OPTIONS]
-    --online             Fetch metadata and covers from MusicBrainz / iTunes / CAA
-    --force              Re-fetch all albums from MusicBrainz (implies --online)
-    --retry-covers       Reset the 7-day cooldown for albums missing covers
-    --retry-mpd-genres   Reset the 7-day cooldown for MPD albums missing genres (requires --online)
+    --pipeline <MODE>    Enrichment stage: mpd, online, or both [default: both]
+    --fetch <WHAT>       Online payload: all, covers, or genres [default: all]
+    --retry <MODE>       Retry selector: none, covers, genres, all, mpd-genres [default: none]
+    --cover-source <SRC> Cover source policy: itunes-caa or caa [default: itunes-caa]
+    --force              Re-fetch all albums from MusicBrainz (online pipeline only)
     --artist <ARTIST>    Limit enrichment to one artist (case-insensitive)
-    --no-itunes          Skip iTunes; fall back directly to Cover Art Archive
-    --no-mpd-covers      Skip MPD embedded cover extraction
-    --mpd-host <HOST>    MPD host for cover extraction [default: localhost]
-    --mpd-port <PORT>    MPD port for cover extraction [default: 6600]
+    --mpd-host <HOST>    MPD host for MPD pipeline [default: localhost]
+    --mpd-port <PORT>    MPD port for MPD pipeline [default: 6600]
     --db-path <PATH>     Path to the SQLite database
 
 scrbblr repair-mpd-covers [OPTIONS]
@@ -298,28 +297,36 @@ scrbblr pin-album [OPTIONS]
 
 ### Enrichment (covers + genres)
 
-Enrichment runs in two stages:
+`enrich` has a clean 3-part model:
+
+- `--pipeline` decides *where* to run enrichment (`mpd`, `online`, `both`)
+- `--fetch` decides *what* to fetch online (`covers`, `genres`, `all`)
+- `--retry` decides *which missing rows* should bypass cooldown before online lookup
+
+Defaults are: `--pipeline both --fetch all --retry none`.
+
+The two pipelines are:
 
 **Stage 1 -- MPD embedded covers (offline, no network)**
 
-By default, `enrich` connects to MPD and extracts embedded cover art from your music files using MPD's `readpicture` command. This is fast, works entirely offline, and only processes albums scrobbled via MPD that don't yet have a cover:
+By default (or with `--pipeline mpd`), `enrich` connects to MPD and extracts embedded cover art from your music files using MPD's `readpicture` command. This is fast, works entirely offline, and only processes albums scrobbled via MPD that don't yet have a cover:
 
 ```bash
-scrbblr enrich
+scrbblr enrich --pipeline mpd
 ```
 
 **Stage 2 -- Online lookup (MusicBrainz + iTunes + Cover Art Archive)**
 
-Pass `--online` to also query MusicBrainz for album metadata (MBID, genres) and download covers for albums that still have none after the MPD pass:
+Use the online pipeline to query MusicBrainz for metadata (MBID, genres) and fetch covers:
 
 ```bash
-scrbblr enrich --online
+scrbblr enrich --pipeline online --fetch all
 ```
 
-Cover art is sourced from **iTunes first** (fast, no rate limiting), then the **Cover Art Archive** as fallback. Pass `--no-itunes` to skip iTunes and use only CAA:
+Cover art is sourced from **iTunes first** (fast, no rate limiting), then the **Cover Art Archive** as fallback. To use only CAA:
 
 ```bash
-scrbblr enrich --online --no-itunes
+scrbblr enrich --pipeline online --fetch covers --cover-source caa
 ```
 
 When MusicBrainz matching is tricky, enrichment retries with normalised album variants (strips parenthetical suffixes, progressively shortens trailing words), tries artist aliases for symbol-heavy names, and falls back to recording search before giving up.
@@ -331,24 +338,26 @@ Genre extraction order:
 3. Release-group `genres`
 4. Release-group `tags`
 
-Automatic enrichment (triggered by `report --html`) uses a 7-day retry cooldown for incomplete cache entries (missing cover or genre) so it doesn't hammer MusicBrainz on every report run. Use `--retry-covers` to reset that cooldown and retry albums missing covers immediately:
+Automatic enrichment (triggered by `report --html`) uses a 7-day retry cooldown for incomplete cache entries (missing cover or genre) so it doesn't hammer MusicBrainz on every report run.
+
+Retry missing covers immediately:
 
 ```bash
-scrbblr enrich --online --retry-covers
+scrbblr enrich --pipeline online --retry covers
 ```
 
-If you specifically want to retry **missing genres for MPD-sourced albums only**:
+Retry missing genres only for MPD-sourced albums:
 
 ```bash
-scrbblr enrich --online --retry-mpd-genres
+scrbblr enrich --pipeline online --fetch genres --retry mpd-genres
 ```
 
 You can combine this with `--artist` to target one artist.
 
-Use `--force` to re-fetch all albums from scratch (ignores the cooldown entirely):
+Use `--force` to re-fetch all albums from scratch (online pipeline only):
 
 ```bash
-scrbblr enrich --online --force
+scrbblr enrich --pipeline online --fetch all --force
 ```
 
 Genre normalisation notes:

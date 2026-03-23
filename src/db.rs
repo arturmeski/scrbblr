@@ -737,7 +737,8 @@ pub struct UncachedAlbum {
 /// have no `cover_url`. This makes [`uncached_albums`] pick them up again on
 /// the next enrichment run, bypassing the 7-day cooldown.
 ///
-/// Used by `enrich --online --retry-covers` to re-attempt cover downloads
+/// Used by `enrich --pipeline online --retry covers` to re-attempt cover
+/// downloads
 /// without forcing a full re-fetch of all albums.
 pub fn reset_missing_cover_timestamps(conn: &Connection) -> Result<usize> {
     let count = conn.execute(
@@ -756,6 +757,60 @@ pub fn reset_missing_cover_timestamps_for_artist(conn: &Connection, artist: &str
         "UPDATE album_cache
          SET fetched_at = NULL
          WHERE cover_url IS NULL
+           AND LOWER(artist) = LOWER(?1)",
+        params![artist],
+    )?;
+    Ok(count)
+}
+
+/// Reset the `fetched_at` timestamp to NULL for all rows that have no genre.
+///
+/// Used when the user explicitly wants to retry genre lookups immediately,
+/// bypassing the default 7-day cooldown.
+pub fn reset_missing_genre_timestamps(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE genre IS NULL",
+        [],
+    )?;
+    Ok(count)
+}
+
+/// Reset `fetched_at` to NULL for genre-missing albums for one artist only.
+///
+/// Matching is case-insensitive (`LOWER(artist) = LOWER(?1)`).
+pub fn reset_missing_genre_timestamps_for_artist(conn: &Connection, artist: &str) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE genre IS NULL
+           AND LOWER(artist) = LOWER(?1)",
+        params![artist],
+    )?;
+    Ok(count)
+}
+
+/// Reset `fetched_at` to NULL for rows missing either cover or genre.
+pub fn reset_incomplete_timestamps(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE cover_url IS NULL OR genre IS NULL",
+        [],
+    )?;
+    Ok(count)
+}
+
+/// Reset `fetched_at` to NULL for incomplete rows for one artist only.
+///
+/// A row is considered incomplete when either `cover_url` or `genre` is NULL.
+/// Matching is case-insensitive (`LOWER(artist) = LOWER(?1)`).
+pub fn reset_incomplete_timestamps_for_artist(conn: &Connection, artist: &str) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE (cover_url IS NULL OR genre IS NULL)
            AND LOWER(artist) = LOWER(?1)",
         params![artist],
     )?;
@@ -2135,6 +2190,110 @@ mod tests {
         let pink_fetched: Option<String> = conn
             .query_row(
                 "SELECT fetched_at FROM album_cache WHERE artist = 'Pink Floyd' AND album = 'The Division Bell'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pink_fetched.is_none());
+
+        let deftones_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist = 'Deftones' AND album = 'White Pony'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let expected = today_at("12:01:00");
+        assert_eq!(deftones_fetched.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_reset_missing_genre_timestamps_for_artist_only() {
+        let conn = open_memory_db().unwrap();
+
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Pink Floyd".into(),
+                album: "The Wall".into(),
+                musicbrainz_id: Some("mbid-1".into()),
+                cover_url: Some("covers/x.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:00:00"),
+            },
+        )
+        .unwrap();
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("mbid-2".into()),
+                cover_url: Some("covers/y.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:01:00"),
+            },
+        )
+        .unwrap();
+
+        let updated = reset_missing_genre_timestamps_for_artist(&conn, "pink floyd").unwrap();
+        assert_eq!(updated, 1);
+
+        let pink_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist = 'Pink Floyd' AND album = 'The Wall'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pink_fetched.is_none());
+
+        let deftones_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist = 'Deftones' AND album = 'White Pony'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let expected = today_at("12:01:00");
+        assert_eq!(deftones_fetched.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_reset_incomplete_timestamps_for_artist_only() {
+        let conn = open_memory_db().unwrap();
+
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Pink Floyd".into(),
+                album: "The Wall".into(),
+                musicbrainz_id: Some("mbid-1".into()),
+                cover_url: None,
+                genre: Some("progressive rock".into()),
+                fetched_at: today_at("12:00:00"),
+            },
+        )
+        .unwrap();
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("mbid-2".into()),
+                cover_url: Some("covers/y.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:01:00"),
+            },
+        )
+        .unwrap();
+
+        let updated = reset_incomplete_timestamps_for_artist(&conn, "pink floyd").unwrap();
+        assert_eq!(updated, 1);
+
+        let pink_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist = 'Pink Floyd' AND album = 'The Wall'",
                 [],
                 |r| r.get(0),
             )
