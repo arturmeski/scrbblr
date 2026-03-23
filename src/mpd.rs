@@ -1120,6 +1120,19 @@ pub fn run_mpd_cover_revalidate(config: &MpdConfig, conn: &Connection, artist: O
         };
 
         let dest = Path::new(&album.cover_url);
+
+        // Sanity-check: only write to paths inside the scrbblr covers
+        // directory. Rejects any DB row whose cover_url was tampered with to
+        // point outside our own data directory.
+        if !dest.starts_with(enrich::covers_dir()) {
+            eprintln!(
+                "  [warn] cover_url '{}' is outside the covers directory; skipping.",
+                album.cover_url
+            );
+            skipped += 1;
+            continue;
+        }
+
         let needs_repair = match std::fs::read(dest) {
             Ok(existing) => existing != processed,
             Err(_) => true,

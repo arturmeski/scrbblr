@@ -1220,6 +1220,13 @@ pub fn enrich_by_mbid(
     mbid: &str,
     cover_url_override: Option<&str>,
 ) {
+    // Reject MBIDs that contain path-traversal sequences or directory
+    // separators — a valid UUID contains only hex digits and hyphens.
+    if mbid.contains("..") || mbid.contains('/') || mbid.contains('\\') {
+        eprintln!("[error] Invalid MBID '{}': must not contain path components.", mbid);
+        return;
+    }
+
     let client = build_client();
     let covers = covers_dir();
 
