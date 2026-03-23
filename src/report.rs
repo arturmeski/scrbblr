@@ -1243,6 +1243,12 @@ h1, h2, h3 { margin: 0; }
   border-radius: 14px; box-shadow: 0 14px 40px rgba(0,0,0,.25);
 }
 .sub { margin-top: 6px; color: var(--muted); font-size: 14px; }
+.sub a {
+  color: var(--bar-fill);
+  text-decoration-color: #a87937;
+  text-underline-offset: 2px;
+}
+.sub a:hover { color: #ffd38e; }
 .jump-nav {
   position: sticky; top: 0; z-index: 20;
   margin-top: 12px; padding: 8px;

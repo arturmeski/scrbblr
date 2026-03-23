@@ -191,6 +191,13 @@ enum Commands {
         #[arg(long)]
         retry_covers: bool,
 
+        /// Re-attempt genre lookups for MPD-sourced albums that still have no
+        /// genre. Resets the 7-day cooldown for those albums only, so the next
+        /// `--online` run retries them. Does not affect albums that already
+        /// have a genre.
+        #[arg(long)]
+        retry_mpd_genres: bool,
+
         /// Limit enrichment to albums by this artist (case-insensitive match).
         ///
         /// Useful when fixing one artist's covers/metadata without touching
@@ -751,6 +758,7 @@ fn main() {
             online,
             force,
             retry_covers,
+            retry_mpd_genres,
             artist,
             no_itunes,
             no_mpd_covers,
@@ -758,6 +766,11 @@ fn main() {
             mpd_port,
             db_path,
         } => {
+            if retry_mpd_genres && !online {
+                eprintln!("--retry-mpd-genres requires --online.");
+                std::process::exit(1);
+            }
+
             if no_mpd_covers && !online {
                 eprintln!("Nothing to do. Pass --online and/or omit --no-mpd-covers.");
                 eprintln!(
@@ -832,6 +845,21 @@ fn main() {
                 match reset {
                     Ok(n) => eprintln!("Reset cooldown for {} album(s) missing covers.", n),
                     Err(e) => eprintln!("[warn] Failed to reset cover timestamps: {}", e),
+                }
+            }
+
+            if retry_mpd_genres {
+                let reset = if let Some(ref artist_name) = artist {
+                    db::reset_missing_genre_timestamps_for_mpd_artist(&conn, artist_name)
+                } else {
+                    db::reset_missing_genre_timestamps_for_mpd(&conn)
+                };
+
+                match reset {
+                    Ok(n) => {
+                        eprintln!("Reset cooldown for {} MPD album(s) missing genres.", n)
+                    }
+                    Err(e) => eprintln!("[warn] Failed to reset MPD genre timestamps: {}", e),
                 }
             }
 

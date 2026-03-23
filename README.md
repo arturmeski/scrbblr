@@ -271,6 +271,7 @@ scrbblr enrich [OPTIONS]
     --online             Fetch metadata and covers from MusicBrainz / iTunes / CAA
     --force              Re-fetch all albums from MusicBrainz (implies --online)
     --retry-covers       Reset the 7-day cooldown for albums missing covers
+    --retry-mpd-genres   Reset the 7-day cooldown for MPD albums missing genres (requires --online)
     --artist <ARTIST>    Limit enrichment to one artist (case-insensitive)
     --no-itunes          Skip iTunes; fall back directly to Cover Art Archive
     --no-mpd-covers      Skip MPD embedded cover extraction
@@ -335,6 +336,14 @@ Automatic enrichment (triggered by `report --html`) uses a 7-day retry cooldown 
 ```bash
 scrbblr enrich --online --retry-covers
 ```
+
+If you specifically want to retry **missing genres for MPD-sourced albums only**:
+
+```bash
+scrbblr enrich --online --retry-mpd-genres
+```
+
+You can combine this with `--artist` to target one artist.
 
 Use `--force` to re-fetch all albums from scratch (ignores the cooldown entirely):
 

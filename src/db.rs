@@ -762,6 +762,49 @@ pub fn reset_missing_cover_timestamps_for_artist(conn: &Connection, artist: &str
     Ok(count)
 }
 
+/// Reset `fetched_at` to NULL for MPD-sourced albums that have no genre yet.
+///
+/// This allows online enrichment to re-try genre lookups immediately for
+/// MPD albums, bypassing the 7-day cooldown used by [`uncached_albums`].
+pub fn reset_missing_genre_timestamps_for_mpd(conn: &Connection) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE genre IS NULL
+           AND EXISTS (
+             SELECT 1 FROM scrobbles s
+             WHERE s.artist = album_cache.artist
+               AND s.album = album_cache.album
+               AND s.source = 'MPD'
+           )",
+        [],
+    )?;
+    Ok(count)
+}
+
+/// Reset `fetched_at` to NULL for one artist's MPD-sourced genre-missing albums.
+///
+/// Matching is case-insensitive (`LOWER(artist) = LOWER(?1)`).
+pub fn reset_missing_genre_timestamps_for_mpd_artist(
+    conn: &Connection,
+    artist: &str,
+) -> Result<usize> {
+    let count = conn.execute(
+        "UPDATE album_cache
+         SET fetched_at = NULL
+         WHERE genre IS NULL
+           AND LOWER(artist) = LOWER(?1)
+           AND EXISTS (
+             SELECT 1 FROM scrobbles s
+             WHERE s.artist = album_cache.artist
+               AND s.album = album_cache.album
+               AND s.source = 'MPD'
+           )",
+        params![artist],
+    )?;
+    Ok(count)
+}
+
 pub fn uncached_albums(conn: &Connection) -> Result<Vec<UncachedAlbum>> {
     // Retry incomplete cache entries at most once per 7 days.
     let retry_before = (chrono::Local::now().naive_local() - chrono::Duration::days(7))
@@ -2101,6 +2144,202 @@ mod tests {
         let deftones_fetched: Option<String> = conn
             .query_row(
                 "SELECT fetched_at FROM album_cache WHERE artist = 'Deftones' AND album = 'White Pony'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let expected = today_at("12:01:00");
+        assert_eq!(deftones_fetched.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_reset_missing_genre_timestamps_for_mpd_only() {
+        let conn = open_memory_db().unwrap();
+
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                title: "Digital Bath".into(),
+                track_duration_secs: Some(291),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:00:00"),
+                source: "MPD".into(),
+            },
+        )
+        .unwrap();
+
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Bonobo".into(),
+                album: "Black Sands".into(),
+                title: "Kiara".into(),
+                track_duration_secs: Some(220),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:01:00"),
+                source: "Qobuz".into(),
+            },
+        )
+        .unwrap();
+
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Tourist".into(),
+                album: "Inside Out".into(),
+                title: "Inside Out".into(),
+                track_duration_secs: Some(240),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:02:00"),
+                source: "MPD".into(),
+            },
+        )
+        .unwrap();
+
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("mbid-1".into()),
+                cover_url: Some("covers/mpd_x.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:00:00"),
+            },
+        )
+        .unwrap();
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Bonobo".into(),
+                album: "Black Sands".into(),
+                musicbrainz_id: Some("mbid-2".into()),
+                cover_url: Some("covers/itunes_x.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:01:00"),
+            },
+        )
+        .unwrap();
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Tourist".into(),
+                album: "Inside Out".into(),
+                musicbrainz_id: Some("mbid-3".into()),
+                cover_url: Some("covers/mpd_y.jpg".into()),
+                genre: Some("downtempo".into()),
+                fetched_at: today_at("12:02:00"),
+            },
+        )
+        .unwrap();
+
+        let updated = reset_missing_genre_timestamps_for_mpd(&conn).unwrap();
+        assert_eq!(updated, 1);
+
+        let deftones_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist='Deftones' AND album='White Pony'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(deftones_fetched.is_none());
+
+        let bonobo_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist='Bonobo' AND album='Black Sands'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let bonobo_expected = today_at("12:01:00");
+        assert_eq!(bonobo_fetched.as_deref(), Some(bonobo_expected.as_str()));
+
+        let tourist_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist='Tourist' AND album='Inside Out'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let tourist_expected = today_at("12:02:00");
+        assert_eq!(tourist_fetched.as_deref(), Some(tourist_expected.as_str()));
+    }
+
+    #[test]
+    fn test_reset_missing_genre_timestamps_for_mpd_artist_only() {
+        let conn = open_memory_db().unwrap();
+
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Pink Floyd".into(),
+                album: "The Wall".into(),
+                title: "Mother".into(),
+                track_duration_secs: Some(345),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:00:00"),
+                source: "MPD".into(),
+            },
+        )
+        .unwrap();
+
+        insert_scrobble(
+            &conn,
+            &NewScrobble {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                title: "Digital Bath".into(),
+                track_duration_secs: Some(291),
+                played_duration_secs: 200,
+                scrobbled_at: today_at("10:01:00"),
+                source: "MPD".into(),
+            },
+        )
+        .unwrap();
+
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Pink Floyd".into(),
+                album: "The Wall".into(),
+                musicbrainz_id: Some("mbid-1".into()),
+                cover_url: Some("covers/mpd_1.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:00:00"),
+            },
+        )
+        .unwrap();
+        upsert_album_cache(
+            &conn,
+            &AlbumCacheEntry {
+                artist: "Deftones".into(),
+                album: "White Pony".into(),
+                musicbrainz_id: Some("mbid-2".into()),
+                cover_url: Some("covers/mpd_2.jpg".into()),
+                genre: None,
+                fetched_at: today_at("12:01:00"),
+            },
+        )
+        .unwrap();
+
+        let updated = reset_missing_genre_timestamps_for_mpd_artist(&conn, "pink floyd").unwrap();
+        assert_eq!(updated, 1);
+
+        let pink_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist='Pink Floyd' AND album='The Wall'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pink_fetched.is_none());
+
+        let deftones_fetched: Option<String> = conn
+            .query_row(
+                "SELECT fetched_at FROM album_cache WHERE artist='Deftones' AND album='White Pony'",
                 [],
                 |r| r.get(0),
             )
