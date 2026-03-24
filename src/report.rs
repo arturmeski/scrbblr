@@ -1053,11 +1053,22 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .flatten()
                     .and_then(|m| m.cover_url);
                 let cover = resolve_cover(cover_url, &mut cover_files);
-                let source_cell = a
-                    .dominant_source
-                    .as_deref()
-                    .map(html_escape)
-                    .unwrap_or_else(|| "-".to_string());
+                let source_cell = if let Some(src) = a.dominant_source.as_deref() {
+                    if let Some((bg, _)) = source_colours(src, &ordered_sources) {
+                        format!(
+                            "<span class=\"source-dot\" style=\"background:{}\" title=\"{}\"></span>",
+                            bg,
+                            html_attr_escape(src)
+                        )
+                    } else {
+                        format!(
+                            "<span class=\"source-dot source-dot-fallback\" title=\"{}\"></span>",
+                            html_attr_escape(src)
+                        )
+                    }
+                } else {
+                    "-".to_string()
+                };
                 BarRow {
                     cells: vec![
                         (i + 1).to_string(),
@@ -1075,7 +1086,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
         write_bar_table(
             &mut h,
             "Top Albums",
-            &["#", "Artist", "Album", "Source", "Plays", ""],
+            &["#", "Artist", "Album", "Src", "Plays", ""],
             &album_rows,
         );
 
@@ -1139,11 +1150,22 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
                     .flatten()
                     .and_then(|m| m.cover_url);
                 let cover = resolve_cover(cover_url, &mut cover_files);
-                let source_cell = t
-                    .dominant_source
-                    .as_deref()
-                    .map(html_escape)
-                    .unwrap_or_else(|| "-".to_string());
+                let source_cell = if let Some(src) = t.dominant_source.as_deref() {
+                    if let Some((bg, _)) = source_colours(src, &ordered_sources) {
+                        format!(
+                            "<span class=\"source-dot\" style=\"background:{}\" title=\"{}\"></span>",
+                            bg,
+                            html_attr_escape(src)
+                        )
+                    } else {
+                        format!(
+                            "<span class=\"source-dot source-dot-fallback\" title=\"{}\"></span>",
+                            html_attr_escape(src)
+                        )
+                    }
+                } else {
+                    "-".to_string()
+                };
                 BarRow {
                     cells: vec![
                         (i + 1).to_string(),
@@ -1161,7 +1183,7 @@ pub fn render_html_report(conn: &Connection, limit: i64, all_time_limit: i64) ->
         write_bar_table(
             &mut h,
             "Top Tracks",
-            &["#", "Artist", "Title", "Source", "Plays", ""],
+            &["#", "Artist", "Title", "Src", "Plays", ""],
             &track_rows,
         );
 
@@ -1295,6 +1317,15 @@ tr:last-child td { border-bottom: none; }
 .bar-track { flex: 1; }
 .bar { height: 18px; border-radius: 4px; background: var(--bar-fill); min-width: 2px; }
 .bar-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.source-col { width: 38px; min-width: 38px; text-align: center; }
+.source-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.source-dot-fallback { background: #7a6a55; }
 .grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .album { position: relative; background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .cover { width: 100%; aspect-ratio: 1/1; object-fit: cover; background: #0d1116; }
@@ -1333,7 +1364,7 @@ tr:last-child td { border-bottom: none; }
   .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .jump-nav { margin-top: 10px; padding: 7px; }
   th, td { padding: 7px 8px; }
-  .source-col { display: none; }
+  .source-col { width: 28px; min-width: 28px; }
   .bar-cell { width: 32%; }
   .bar-wrap { gap: 4px; }
   .bar-label { font-size: 11px; }
@@ -1531,7 +1562,7 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
     // it can be hidden together with the td.play-count cells on mobile.
     let play_count_idx = headers.len().saturating_sub(2);
     for (i, hdr) in headers.iter().enumerate() {
-        if *hdr == "Source" {
+        if *hdr == "Src" {
             h.linef(format_args!(
                 "<th class=\"source-col\">{}</th>",
                 html_escape(hdr)
@@ -1563,7 +1594,7 @@ fn write_bar_table(h: &mut HtmlWriter, title: &str, headers: &[&str], rows: &[Ba
             }
         }
         for (i, cell) in row.cells.iter().enumerate() {
-            if headers.get(i).is_some_and(|h| *h == "Source") {
+            if headers.get(i).is_some_and(|h| *h == "Src") {
                 if row.raw_cells {
                     h.linef(format_args!("<td class=\"source-col\">{}</td>", cell));
                 } else {
